@@ -133,4 +133,27 @@ describe('without-daemon strategy', () => {
 		await expect(runWithoutDaemon(cfg())).resolves.not.toThrow();
 		expect(readState(stateFilePath(configDir))).toBeNull();
 	});
+
+	it('skips entirely when autoUpdate: false in config', async () => {
+		const { writeFileSync } = await import('node:fs');
+		const { mkdirSync } = await import('node:fs');
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(`${configDir}/config.yml`, 'autoUpdate: false\n');
+
+		await runWithoutDaemon(cfg());
+
+		expect(mockFetch).not.toHaveBeenCalled();
+		expect(readState(stateFilePath(configDir))).toBeNull();
+	});
+
+	it('succeeds without self-check when UPDATER_SELF_CHECK_CMD is not set', async () => {
+		mockFetch.mockReturnValue('1.0.1');
+		mockExecNpm.mockReturnValue('');
+		delete process.env['UPDATER_SELF_CHECK_CMD'];
+
+		await runWithoutDaemon(cfg());
+
+		const state = readState(stateFilePath(configDir));
+		expect(state?.status).toBe('success');
+	});
 });

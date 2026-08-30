@@ -147,4 +147,15 @@ describe('with-daemon strategy', () => {
 			releaseLock(lockFilePath(configDir));
 		}
 	});
+
+	it('skips entirely when autoUpdate: false in config', async () => {
+		const { writeFileSync, mkdirSync } = await import('node:fs');
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(`${configDir}/config.yml`, 'autoUpdate: false\n');
+
+		await runWithDaemon(cfg());
+
+		expect(mockFetch).not.toHaveBeenCalled();
+		expect(readState(stateFilePath(configDir))).toBeNull();
+	});
 });

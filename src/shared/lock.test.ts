@@ -42,6 +42,12 @@ describe('tryAcquireLock', () => {
 		// stale by time, even if PID matches current process — age check runs first
 		expect(tryAcquireLock(lockFile)).toBe(true);
 	});
+
+	it('creates parent directories when they do not exist', () => {
+		const deepLock = join(configDir, 'nested', 'subdir', 'update.lock');
+		expect(tryAcquireLock(deepLock)).toBe(true);
+		expect(existsSync(deepLock)).toBe(true);
+	});
 });
 
 describe('releaseLock', () => {
