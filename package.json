@@ -1,0 +1,49 @@
+{
+	"name": "@wadeck-app/shared-updater",
+	"//version": "DO NOT manually edit this field. CI overwrites it via ci/scripts/compute-version.sh.",
+	"version": "1.0.0",
+	"description": "Shared auto-update logic for @wadeck-app CLIs — without-daemon and with-daemon strategies",
+	"type": "module",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/wadeck-app/shared-updater.git"
+	},
+	"publishConfig": {
+		"@wadeck-app:registry": "https://npm.pkg.github.com/",
+		"access": "public"
+	},
+	"exports": {
+		".": {
+			"import": "./dist/index.js",
+			"require": "./dist/cjs/index.js",
+			"types": "./dist/index.d.ts"
+		},
+		"./without-daemon": {
+			"import": "./dist/strategies/without-daemon.js",
+			"require": "./dist/cjs/strategies/without-daemon.js",
+			"types": "./dist/strategies/without-daemon.d.ts"
+		},
+		"./with-daemon": {
+			"import": "./dist/strategies/with-daemon.js",
+			"require": "./dist/cjs/strategies/with-daemon.js",
+			"types": "./dist/strategies/with-daemon.d.ts"
+		}
+	},
+	"main": "./dist/cjs/index.js",
+	"types": "./dist/index.d.ts",
+	"files": [
+		"dist",
+		"tsconfig.cjs.json"
+	],
+	"scripts": {
+		"build": "tsc && tsc -p tsconfig.cjs.json && printf '{\"type\":\"commonjs\"}\\n' > dist/cjs/package.json",
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run",
+		"preversion": "node -e \"if (!process.env.CI) { console.error('ERROR: version is CI-managed. Do not run npm version manually.'); process.exit(1); }\""
+	},
+	"devDependencies": {
+		"@types/node": "^24.0.0",
+		"typescript": "^7.0.0",
+		"vitest": "^4.0.14"
+	}
+}
