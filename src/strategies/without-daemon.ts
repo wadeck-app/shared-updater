@@ -1,3 +1,5 @@
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type { WithoutDaemonConfig } from '../types.js';
 import { tryAcquireLock, releaseLock } from '../shared/lock.js';
 import { readCache, writeCache, writeState, stateFilePath, cacheFilePath, lockFilePath } from '../shared/state.js';
@@ -84,8 +86,56 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 			timestamp: Date.now(),
 		});
 		appendLog(configDir, 'info', `${pkgName} updated to ${latestVersion}`);
+
+		if (cfg.restartDaemon) {
+			await restartDaemon(cfg, latestVersion);
+		}
 	} finally {
 		releaseLock(lockFile);
+	}
+}
+
+// Writes config.restart sentinel so the Go launcher restarts the daemon,
+// then sends POST /quit to trigger graceful shutdown of the running daemon.
+async function restartDaemon(cfg: WithoutDaemonConfig, latestVersion: string): Promise<void> {
+	const { configDir, pkgName, restartDaemon: rd } = cfg;
+	if (!rd) return;
+
+	// Write restart sentinel — Go launcher detects this on daemon exit and restarts it.
+	try {
+		writeFileSync(join(configDir, 'config.restart'), '1', 'utf-8');
+		appendLog(configDir, 'info', `${pkgName} restart sentinel written`);
+	} catch (err) {
+		appendLog(configDir, 'warn', `${pkgName} failed to write restart sentinel: ${err}`);
+		return;
+	}
+
+	// Send POST /quit to daemon — it exits cleanly, Go launcher detects exit + sentinel, restarts.
+	if (!existsSync(rd.portFile)) {
+		appendLog(configDir, 'info', `${pkgName} daemon not running (no port file), restart will happen on next start`);
+		return;
+	}
+
+	let port: number;
+	let token: string;
+	try {
+		const data = JSON.parse(readFileSync(rd.portFile, 'utf8'));
+		port = data.port;
+		token = readFileSync(rd.healthTokenFile, 'utf8').trim();
+	} catch (err) {
+		appendLog(configDir, 'warn', `${pkgName} cannot read port/token for restart: ${err}`);
+		return;
+	}
+
+	try {
+		await fetch(`http://127.0.0.1:${port}/quit`, {
+			method: 'POST',
+			headers: { Authorization: `Bearer ${token}` },
+			signal: AbortSignal.timeout(5000),
+		});
+		appendLog(configDir, 'info', `${pkgName} POST /quit sent on port ${port} — daemon will restart with ${latestVersion}`);
+	} catch (err) {
+		appendLog(configDir, 'warn', `${pkgName} POST /quit failed: ${err}`);
 	}
 }
 

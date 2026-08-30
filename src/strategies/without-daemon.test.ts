@@ -156,4 +156,77 @@ describe('without-daemon strategy', () => {
 		const state = readState(stateFilePath(configDir));
 		expect(state?.status).toBe('success');
 	});
+
+	describe('restartDaemon', () => {
+		it('writes config.restart sentinel and sends POST /quit when daemon is running', async () => {
+			const { writeFileSync } = await import('node:fs');
+			const { join } = await import('node:path');
+
+			// Write fake port file and health_token
+			writeFileSync(join(configDir, 'config.port'), JSON.stringify({ port: 49876, pid: 99999 }));
+			writeFileSync(join(configDir, 'health_token'), 'test-token');
+
+			const mockFetchImpl = vi.fn().mockResolvedValue(new Response('', { status: 200 }));
+			vi.stubGlobal('fetch', mockFetchImpl);
+
+			mockFetch.mockReturnValue('1.0.1');
+			mockExecNpm.mockReturnValue('');
+
+			await runWithoutDaemon({
+				...cfg(),
+				restartDaemon: {
+					portFile: join(configDir, 'config.port'),
+					healthTokenFile: join(configDir, 'health_token'),
+				},
+			});
+
+			// State should be success
+			const state = readState(stateFilePath(configDir));
+			expect(state?.status).toBe('success');
+
+			// config.restart sentinel should be written
+			const { existsSync, readFileSync } = await import('node:fs');
+			expect(existsSync(join(configDir, 'config.restart'))).toBe(true);
+			expect(readFileSync(join(configDir, 'config.restart'), 'utf8')).toBe('1');
+
+			// POST /quit should have been sent
+			expect(mockFetchImpl).toHaveBeenCalledWith(
+				'http://127.0.0.1:49876/quit',
+				expect.objectContaining({ method: 'POST' }),
+			);
+
+			vi.unstubAllGlobals();
+		});
+
+		it('skips POST /quit when daemon port file is missing but still writes sentinel', async () => {
+			const { writeFileSync } = await import('node:fs');
+			const { join } = await import('node:path');
+
+			const mockFetchImpl = vi.fn();
+			vi.stubGlobal('fetch', mockFetchImpl);
+
+			mockFetch.mockReturnValue('1.0.1');
+			mockExecNpm.mockReturnValue('');
+
+			await runWithoutDaemon({
+				...cfg(),
+				restartDaemon: {
+					portFile: join(configDir, 'config.port'), // does not exist
+					healthTokenFile: join(configDir, 'health_token'),
+				},
+			});
+
+			const state = readState(stateFilePath(configDir));
+			expect(state?.status).toBe('success');
+
+			// Sentinel written even without daemon
+			const { existsSync } = await import('node:fs');
+			expect(existsSync(join(configDir, 'config.restart'))).toBe(true);
+
+			// No POST /quit attempted
+			expect(mockFetchImpl).not.toHaveBeenCalled();
+
+			vi.unstubAllGlobals();
+		});
+	});
 });

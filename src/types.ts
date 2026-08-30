@@ -35,8 +35,21 @@ export interface WithDaemonConfig extends UpdaterBaseConfig {
 	// No extra fields needed.
 }
 
+export interface RestartDaemonConfig {
+	/** Path to configDir/config.port (singleton-daemon-kit PortFileData). */
+	portFile: string;
+	/** Path to configDir/health_token (singleton-daemon-kit health-server). */
+	healthTokenFile: string;
+}
+
 export interface WithoutDaemonConfig extends UpdaterBaseConfig {
 	strategy: 'without-daemon';
+	/**
+	 * When set, writes config.restart sentinel then POST /quit after a successful
+	 * npm install so the Go launcher restarts the daemon with the new version.
+	 * Use for CLIs that have a long-running daemon managed by singleton-daemon-kit.
+	 */
+	restartDaemon?: RestartDaemonConfig;
 }
 
 export type UpdaterConfig = WithoutDaemonConfig | WithDaemonConfig;
