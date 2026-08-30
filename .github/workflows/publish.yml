@@ -67,11 +67,10 @@ jobs:
 
       - name: Compute version
         id: version
-        run: bash ci/scripts/compute-version.sh
-        env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          VERSION_INPUT: ${{ github.event.inputs.version }}
-          BREAKING_INPUT: ${{ github.event.inputs.breaking }}
+        uses: wadeck-app/ci-templates/.github/actions/compute-version@main
+        with:
+          version-input: ${{ github.event.inputs.version || '' }}
+          breaking-input: ${{ github.event.inputs.breaking || 'false' }}
 
       - name: Inject version
         run: npm pkg set version="${{ steps.version.outputs.version }}"
