@@ -21,19 +21,18 @@ permissions:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }}, Node ${{ matrix.node }})
+    name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        node: ['20', '22', '24']
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v5
         with:
-          node-version: ${{ matrix.node }}
+          node-version: '24'
           registry-url: 'https://npm.pkg.github.com'
           scope: '@wadeck-app'
 

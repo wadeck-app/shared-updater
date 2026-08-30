@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as http from 'node:http';
+import type { AddressInfo } from 'node:net';
 
 vi.mock('../shared/fetch.js', () => ({ fetchLatestVersion: vi.fn() }));
 vi.mock('../shared/npm.js', () => ({ execNpm: vi.fn(), USE_NPM_CLI: false }));
@@ -63,7 +64,7 @@ describe('with-daemon strategy', () => {
 			res.writeHead(200).end('{}');
 		});
 		await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-		const port = (server.address() as http.AddressInfo).port;
+		const port = (server.address() as AddressInfo).port;
 		writePortFile(port);
 		writeHealthToken(TOKEN);
 
@@ -112,7 +113,7 @@ describe('with-daemon strategy', () => {
 			// never respond — simulate hang
 		});
 		await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-		const port = (server.address() as http.AddressInfo).port;
+		const port = (server.address() as AddressInfo).port;
 		writePortFile(port);
 		writeHealthToken(TOKEN);
 
