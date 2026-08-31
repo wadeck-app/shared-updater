@@ -25,7 +25,21 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 
 		const cache = readCache(cacheFilePath(configDir));
 		const now = Date.now();
-		if (!force && cache && now - cache.lastCheckedAt < updateCfg.checkIntervalMs) return;
+
+		// If a deferred update has reached its retryAt, bypass the cache and re-check.
+		const stateFile = stateFilePath(configDir);
+		let deferredRetryDue = false;
+		if (existsSync(stateFile)) {
+			try {
+				const state = JSON.parse(readFileSync(stateFile, 'utf8')) as { status?: string; retryAt?: number };
+				if (state.status === 'deferred' && typeof state.retryAt === 'number' && state.retryAt <= now) {
+					deferredRetryDue = true;
+					appendLog(configDir, 'info', `${pkgName} deferred update retry due`);
+				}
+			} catch { /* ignore corrupt state file */ }
+		}
+
+		if (!force && !deferredRetryDue && cache && now - cache.lastCheckedAt < updateCfg.checkIntervalMs) return;
 
 		appendLog(configDir, 'info', `${pkgName} checking for updates (current: ${currentVersion})`);
 
