@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -207,6 +207,57 @@ describe('without-daemon strategy', () => {
 			// retryAt should be approximately before + 300_000
 			expect(state?.retryAt).toBeGreaterThanOrEqual(before + 300_000 - 100);
 			expect(state?.retryAt).toBeLessThanOrEqual(Date.now() + 300_000 + 100);
+		});
+	});
+
+	describe('deferred retryAt', () => {
+		it('re-checks when deferred state retryAt has passed, even if cache is fresh', async () => {
+			mockFetch.mockReturnValue('1.0.1');
+			mockExecNpm.mockReturnValue('');
+
+			// Set fresh cache (would normally prevent re-check)
+			writeFileSync(join(configDir, 'update-cache.json'), JSON.stringify({
+				lastCheckedAt: Date.now(),
+				latestVersion: '1.0.0',
+			}));
+
+			// Set deferred state with retryAt in the past
+			writeFileSync(join(configDir, 'update-state.json'), JSON.stringify({
+				status: 'deferred',
+				targetVersion: '1.0.1',
+				retryAt: Date.now() - 1000, // already past
+			}));
+
+			await runWithoutDaemon(cfg());
+
+			const state = readState(join(configDir, 'update-state.json'));
+			// Should have re-checked and installed
+			expect(state?.status).toBe('success');
+			expect(mockFetch).toHaveBeenCalled();
+			expect(mockExecNpm).toHaveBeenCalledWith(
+				expect.arrayContaining(['install']),
+				expect.anything(),
+			);
+		});
+
+		it('does NOT re-check when deferred retryAt is still in the future', async () => {
+			mockFetch.mockReturnValue('1.0.1');
+
+			writeFileSync(join(configDir, 'update-cache.json'), JSON.stringify({
+				lastCheckedAt: Date.now(),
+				latestVersion: '1.0.0',
+			}));
+
+			writeFileSync(join(configDir, 'update-state.json'), JSON.stringify({
+				status: 'deferred',
+				targetVersion: '1.0.1',
+				retryAt: Date.now() + 300_000, // still in the future
+			}));
+
+			await runWithoutDaemon(cfg());
+
+			// Cache is fresh AND retryAt is future → no re-check
+			expect(mockFetch).not.toHaveBeenCalled();
 		});
 	});
 
