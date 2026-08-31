@@ -157,6 +157,59 @@ describe('without-daemon strategy', () => {
 		expect(state?.status).toBe('success');
 	});
 
+	describe('onUpdateAvailable', () => {
+		it('proceeds with install when callback returns apply-now', async () => {
+			mockFetch.mockReturnValue('1.0.1');
+			mockExecNpm.mockReturnValue('');
+
+			await runWithoutDaemon({
+				...cfg(),
+				onUpdateAvailable: async () => 'apply-now',
+			});
+
+			expect(mockExecNpm).toHaveBeenCalledWith(
+				['install', '-g', '@test/pkg@1.0.1'],
+				expect.objectContaining({ timeout: expect.any(Number) }),
+			);
+			const state = readState(stateFilePath(configDir));
+			expect(state?.status).toBe('success');
+		});
+
+		it('defers install when callback returns { defer: true } (default retryIn)', async () => {
+			mockFetch.mockReturnValue('1.0.1');
+
+			await runWithoutDaemon({
+				...cfg(),
+				onUpdateAvailable: async () => ({ defer: true }),
+			});
+
+			expect(mockExecNpm).not.toHaveBeenCalled();
+			const state = readState(stateFilePath(configDir));
+			expect(state?.status).toBe('deferred');
+			expect(state?.targetVersion).toBe('1.0.1');
+			// retryAt should be in the future
+			expect(state?.retryAt).toBeGreaterThan(Date.now() - 1000);
+		});
+
+		it('defers with custom retryIn when callback returns { defer: true, retryIn }', async () => {
+			mockFetch.mockReturnValue('1.0.1');
+			const before = Date.now();
+
+			await runWithoutDaemon({
+				...cfg(),
+				onUpdateAvailable: async () => ({ defer: true, retryIn: 300_000 }),
+			});
+
+			expect(mockExecNpm).not.toHaveBeenCalled();
+			const state = readState(stateFilePath(configDir));
+			expect(state?.status).toBe('deferred');
+			expect(state?.targetVersion).toBe('1.0.1');
+			// retryAt should be approximately before + 300_000
+			expect(state?.retryAt).toBeGreaterThanOrEqual(before + 300_000 - 100);
+			expect(state?.retryAt).toBeLessThanOrEqual(Date.now() + 300_000 + 100);
+		});
+	});
+
 	describe('restartDaemon', () => {
 		it('writes config.restart sentinel and sends POST /quit when daemon is running', async () => {
 			const { writeFileSync } = await import('node:fs');

@@ -46,6 +46,23 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 
 		appendLog(configDir, 'info', `${pkgName} update available: ${currentVersion} → ${latestVersion}`);
 
+		if (cfg.onUpdateAvailable) {
+			const decision = await cfg.onUpdateAvailable(latestVersion);
+			if (typeof decision === 'object' && decision.defer) {
+				const retryIn = decision.retryIn ?? updateCfg.checkIntervalMs;
+				writeState(stateFilePath(configDir), {
+					status: 'deferred',
+					currentVersion,
+					targetVersion: latestVersion,
+					retryAt: Date.now() + retryIn,
+					timestamp: Date.now(),
+				});
+				appendLog(configDir, 'info', `${pkgName} update deferred to ${latestVersion} (retry in ${retryIn}ms)`);
+				return;
+			}
+			// decision === 'apply-now': fall through to install
+		}
+
 		try {
 			execNpm(['install', '-g', `${pkgName}@${latestVersion}`], { timeout: 5 * 60_000 });
 		} catch (err) {

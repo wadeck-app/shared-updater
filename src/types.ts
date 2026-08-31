@@ -10,12 +10,14 @@ export interface UpdateCache {
 }
 
 export interface UpdateState {
-	status: 'update-available' | 'success' | 'failed' | 'rolled-back';
+	status: 'update-available' | 'success' | 'failed' | 'rolled-back' | 'deferred';
 	currentVersion: string;
 	targetVersion?: string;
 	previousVersion?: string;
 	error?: string;
 	timestamp: number;
+	/** Set when status is 'deferred': epoch ms at which the update should be retried. */
+	retryAt?: number;
 }
 
 export type Strategy = 'without-daemon' | 'with-daemon';
@@ -50,6 +52,20 @@ export interface WithoutDaemonConfig extends UpdaterBaseConfig {
 	 * Use for CLIs that have a long-running daemon managed by singleton-daemon-kit.
 	 */
 	restartDaemon?: RestartDaemonConfig;
+	/**
+	 * Called when a new version is detected, before the update is applied.
+	 * Return 'apply-now' to proceed immediately, or { defer: true, retryIn? }
+	 * to skip this run and retry after retryIn ms (default: checkIntervalMs).
+	 *
+	 * Use cases:
+	 *   - flow-cli: defer if a flow is currently running
+	 *   - wdrive: defer if a sync is active (retryIn: 5 * 60_000)
+	 *   - orchestrator: defer if critical jobs are running
+	 */
+	onUpdateAvailable?: (newVersion: string) => Promise<
+		| 'apply-now'
+		| { defer: true; retryIn?: number }
+	>;
 }
 
 export type UpdaterConfig = WithoutDaemonConfig | WithDaemonConfig;
