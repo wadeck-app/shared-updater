@@ -66,6 +66,12 @@ export interface WithoutDaemonConfig extends UpdaterBaseConfig {
 		| 'apply-now'
 		| { defer: true; retryIn?: number }
 	>;
+	/**
+	 * Extra flags passed to `npm install -g` during update and rollback.
+	 * Use ['--ignore-scripts'] for packages with problematic postinstall scripts
+	 * (e.g. whatsapp-web.js runs husky on install which fails in non-interactive env).
+	 */
+	npmInstallFlags?: string[];
 }
 
 export type UpdaterConfig = WithoutDaemonConfig | WithDaemonConfig;

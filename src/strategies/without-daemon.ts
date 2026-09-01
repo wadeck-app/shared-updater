@@ -78,7 +78,7 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 		}
 
 		try {
-			execNpm(['install', '-g', `${pkgName}@${latestVersion}`], { timeout: 5 * 60_000 });
+			execNpm(['install', '-g', `${pkgName}@${latestVersion}`, ...(cfg.npmInstallFlags ?? [])], { timeout: 5 * 60_000 });
 		} catch (err) {
 			appendLog(configDir, 'error', `${pkgName} install failed: ${err}`);
 			writeState(stateFilePath(configDir), {
@@ -95,7 +95,7 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 		if (!selfCheckPassed) {
 			appendLog(configDir, 'warn', `${pkgName} self-check failed after update, rolling back to ${currentVersion}`);
 			try {
-				execNpm(['install', '-g', `${pkgName}@${currentVersion}`], { timeout: 5 * 60_000 });
+				execNpm(['install', '-g', `${pkgName}@${currentVersion}`, ...(cfg.npmInstallFlags ?? [])], { timeout: 5 * 60_000 });
 				writeState(stateFilePath(configDir), {
 					status: 'rolled-back',
 					currentVersion,
