@@ -1,3 +1,4 @@
+// violations-suppress: ts/no-barrel-index published package API
 export type { UpdaterConfig, WithDaemonConfig, WithoutDaemonConfig, UpdateConfig, UpdateState, UpdateCache, Strategy } from './types.js';
 export { semverLte } from './shared/semver.js';
 export { execNpm } from './shared/npm.js';

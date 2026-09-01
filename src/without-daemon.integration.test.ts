@@ -10,7 +10,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockRegistry } from './MockRegistry.js';
-import { runUpdater } from '../index.js';
+import { runUpdater } from './index.js';
 
 // ---------------------------------------------------------------------------
 // Registry shared across tests (started once)
@@ -49,13 +49,15 @@ function isInstalled(prefix: string, pkgName: string): boolean {
 function readState(configDir: string): Record<string, unknown> {
 	const path = join(configDir, 'update-state.json');
 	if (!existsSync(path)) throw new Error(`update-state.json not found in ${configDir}`);
-	return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+	const data: Record<string, unknown> = JSON.parse(readFileSync(path, 'utf8'));
+	return data;
 }
 
 function readCache(configDir: string): Record<string, unknown> {
 	const path = join(configDir, 'update-cache.json');
 	if (!existsSync(path)) throw new Error(`update-cache.json not found in ${configDir}`);
-	return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+	const data: Record<string, unknown> = JSON.parse(readFileSync(path, 'utf8'));
+	return data;
 }
 
 const PKG = '@test/my-cli';
