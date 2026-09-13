@@ -20,7 +20,20 @@ export async function runWithDaemon(cfg: WithDaemonConfig): Promise<void> {
 
 	try {
 		const updateCfg = readUpdateConfig(configDir);
-		if (updateCfg.disabled) return;
+		// autoUpdate: false disables updating on our own initiative, not an update the user just
+		// asked for: UPDATER_FORCE=1 is only ever set by an explicit `<cli> cli update`. Either way
+		// the decision is logged -- returning in silence made an explicit update look like a no-op.
+		if (updateCfg.disabled) {
+			if (!force) {
+				appendLog(configDir, 'info', `${pkgName} not updating: autoUpdate: false in ${configDir}/config.yml`);
+				return;
+			}
+			appendLog(
+				configDir,
+				'warn',
+				`${pkgName} update requested explicitly, overriding autoUpdate: false in ${configDir}/config.yml`,
+			);
+		}
 
 		const cache = readCache(cacheFilePath(configDir));
 		const now = Date.now();

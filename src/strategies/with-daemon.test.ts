@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as http from 'node:http';
@@ -26,6 +26,14 @@ function writePortFile(port: number): void {
 
 function writeHealthToken(token: string): void {
 	writeFileSync(join(configDir, 'health_token'), token);
+}
+
+// The updater's only user-visible trace is its log file; a test asserting "it did nothing" has to
+// read it, otherwise a silent early return looks identical to a deliberate, explained skip.
+function readLog(dir: string): string {
+	const today = new Date().toISOString().slice(0, 10);
+	const logFile = join(dir, 'logs', `${today}.ndjson`);
+	return existsSync(logFile) ? readFileSync(logFile, 'utf8') : '';
 }
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef';
@@ -157,5 +165,31 @@ describe('with-daemon strategy', () => {
 
 		expect(mockFetch).not.toHaveBeenCalled();
 		expect(readState(stateFilePath(configDir))).toBeNull();
+	});
+
+	it('says so in the log when autoUpdate: false stops it, instead of returning silently', async () => {
+		const { writeFileSync, mkdirSync } = await import('node:fs');
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(`${configDir}/config.yml`, 'autoUpdate: false\n');
+
+		await runWithDaemon(cfg());
+
+		expect(readLog(configDir)).toMatch(/autoUpdate: false/);
+	});
+
+	// autoUpdate: false means "do not update on your own", not "ignore what the user just asked for".
+	// UPDATER_FORCE=1 is only ever set by an explicit `<cli> cli update`.
+	it('still checks when forced explicitly, and records that it overrode autoUpdate: false', async () => {
+		const { writeFileSync, mkdirSync } = await import('node:fs');
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(`${configDir}/config.yml`, 'autoUpdate: false\n');
+		process.env['UPDATER_FORCE'] = '1';
+		mockFetch.mockReturnValue('1.0.1');
+
+		await runWithDaemon(cfg());
+
+		expect(mockFetch).toHaveBeenCalled();
+		expect(readState(stateFilePath(configDir))?.status).toBe('update-available');
+		expect(readLog(configDir)).toMatch(/autoUpdate: false/);
 	});
 });

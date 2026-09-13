@@ -1,7 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+// The updater's only user-visible trace is its log file; a test asserting "it did nothing" has to
+// read it, otherwise a silent early return looks identical to a deliberate, explained skip.
+function readLog(configDir: string): string {
+	const today = new Date().toISOString().slice(0, 10);
+	const logFile = join(configDir, 'logs', `${today}.ndjson`);
+	return existsSync(logFile) ? readFileSync(logFile, 'utf8') : '';
+}
 
 vi.mock('../shared/fetch.js', () => ({ fetchLatestVersion: vi.fn() }));
 vi.mock('../shared/npm.js', () => ({ execNpm: vi.fn(), USE_NPM_CLI: false }));
@@ -144,6 +152,34 @@ describe('without-daemon strategy', () => {
 
 		expect(mockFetch).not.toHaveBeenCalled();
 		expect(readState(stateFilePath(configDir))).toBeNull();
+	});
+
+	it('says so in the log when autoUpdate: false stops it, instead of returning silently', async () => {
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(`${configDir}/config.yml`, 'autoUpdate: false\n');
+
+		await runWithoutDaemon(cfg());
+
+		expect(readLog(configDir)).toMatch(/autoUpdate: false/);
+	});
+
+	// autoUpdate: false means "do not update on your own", not "ignore what the user just asked for".
+	// UPDATER_FORCE=1 is only ever set by an explicit `<cli> cli update`.
+	it('still updates when forced explicitly, and records that it overrode autoUpdate: false', async () => {
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(`${configDir}/config.yml`, 'autoUpdate: false\n');
+		process.env['UPDATER_FORCE'] = '1';
+		mockFetch.mockReturnValue('1.0.1');
+		mockExecNpm.mockReturnValue('');
+
+		await runWithoutDaemon(cfg());
+
+		expect(mockExecNpm).toHaveBeenCalledWith(
+			['install', '-g', '@test/pkg@1.0.1'],
+			expect.objectContaining({ timeout: expect.any(Number) }),
+		);
+		expect(readState(stateFilePath(configDir))?.status).toBe('success');
+		expect(readLog(configDir)).toMatch(/autoUpdate: false/);
 	});
 
 	it('succeeds without self-check when UPDATER_SELF_CHECK_CMD is not set', async () => {
