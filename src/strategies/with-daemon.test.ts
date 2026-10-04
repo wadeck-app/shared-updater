@@ -143,6 +143,7 @@ describe('with-daemon strategy', () => {
 		await runWithDaemon(cfg());
 
 		expect(mockFetch).not.toHaveBeenCalled();
+		expect(readLog(configDir)).toContain('check skipped');
 	});
 
 	it('second concurrent run is skipped (lock held)', async () => {

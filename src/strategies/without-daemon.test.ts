@@ -78,6 +78,7 @@ describe('without-daemon strategy', () => {
 		await runWithoutDaemon(cfg());
 
 		expect(mockFetch).not.toHaveBeenCalled();
+		expect(readLog(configDir)).toContain('check skipped');
 	});
 
 	it('UPDATER_FORCE bypasses fresh cache', async () => {

@@ -52,7 +52,14 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 			} catch { /* ignore corrupt state file */ }
 		}
 
-		if (!force && !deferredRetryDue && cache && now - cache.lastCheckedAt < updateCfg.checkIntervalMs) return;
+		if (!force && !deferredRetryDue && cache && now - cache.lastCheckedAt < updateCfg.checkIntervalMs) {
+			// This used to return in silence: a caller invoking us every 30m (to not miss a 4h-ish
+			// checkIntervalMs by much) looked identical in the logs to the check never running at all.
+			const sinceMin = Math.round((now - cache.lastCheckedAt) / 60_000);
+			const dueInMin = Math.round((updateCfg.checkIntervalMs - (now - cache.lastCheckedAt)) / 60_000);
+			appendLog(configDir, 'info', `${pkgName} check skipped: last checked ${sinceMin}m ago, next check in ~${dueInMin}m`);
+			return;
+		}
 
 		appendLog(configDir, 'info', `${pkgName} checking for updates (current: ${currentVersion})`);
 
