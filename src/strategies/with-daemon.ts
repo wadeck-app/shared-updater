@@ -37,7 +37,7 @@ export async function runWithDaemon(cfg: WithDaemonConfig): Promise<void> {
 
 		const cache = readCache(cacheFilePath(configDir));
 		const now = Date.now();
-		if (!force && cache && now - cache.lastCheckedAt < updateCfg.checkIntervalMs) {
+		if (!force && !cfg.skipThrottle && cache && now - cache.lastCheckedAt < updateCfg.checkIntervalMs) {
 			// This used to return in silence: a caller invoking us every 30m (to not miss a 4h-ish
 			// checkIntervalMs by much) looked identical in the logs to the check never running at all.
 			const sinceMin = Math.round((now - cache.lastCheckedAt) / 60_000);

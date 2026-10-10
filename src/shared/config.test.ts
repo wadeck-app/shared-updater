@@ -13,7 +13,7 @@ describe('readUpdateConfig', () => {
 	it('no config.yml → defaults', () => {
 		const cfg = readUpdateConfig(configDir);
 		expect(cfg.channel).toBe('latest');
-		expect(cfg.checkIntervalMs).toBe(4 * 60 * 60 * 1000);
+		expect(cfg.checkIntervalMs).toBe(30 * 60 * 1000);
 		expect(cfg.disabled).toBe(false);
 	});
 

@@ -27,6 +27,17 @@ export interface UpdaterBaseConfig {
 	configDir: string;
 	currentVersion: string;
 	strategy: Strategy;
+	/**
+	 * Skips the cache.lastCheckedAt/checkIntervalMs throttle. For a caller that already owns its
+	 * own invocation cadence (a long-running daemon with its own timer, e.g. orchestrator,
+	 * wdrive) -- the throttle exists to protect npm from CLIs that re-invoke the updater on every
+	 * command (queue, the scrapers), which has no schedule of its own to rely on. A daemon setting
+	 * this to true and ALSO matching its spawn interval to checkIntervalMs is how a stale version
+	 * sat unnoticed on orchestrator for days: the two intervals beat against each other and the
+	 * throttle silently skipped every other spawn. autoUpdate: false and the in-flight lock still
+	 * apply -- this only removes the time-based gate.
+	 */
+	skipThrottle?: boolean;
 }
 
 export interface WithDaemonConfig extends UpdaterBaseConfig {

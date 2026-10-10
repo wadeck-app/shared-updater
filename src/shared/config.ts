@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { UpdateConfig } from '../types.js';
 
 const DEFAULT_CHANNEL = 'latest';
-const DEFAULT_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+const DEFAULT_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 
 export function readUpdateConfig(configDir: string): UpdateConfig {
 	const configFile = join(configDir, 'config.yml');

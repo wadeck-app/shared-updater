@@ -146,6 +146,16 @@ describe('with-daemon strategy', () => {
 		expect(readLog(configDir)).toContain('check skipped');
 	});
 
+	it('skipThrottle bypasses fresh cache, for a caller that already owns its own cadence', async () => {
+		const { writeCache } = await import('../shared/state.js');
+		writeCache(cacheFilePath(configDir), { lastCheckedAt: Date.now(), latestVersion: '1.0.0' });
+		mockFetch.mockReturnValue('1.0.0');
+
+		await runWithDaemon({ ...cfg(), skipThrottle: true });
+
+		expect(mockFetch).toHaveBeenCalled();
+	});
+
 	it('second concurrent run is skipped (lock held)', async () => {
 		mockFetch.mockReturnValue('1.0.1');
 		tryAcquireLock(lockFilePath(configDir));
