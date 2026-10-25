@@ -33,6 +33,24 @@ function setEnv(r: MockRegistry): void {
 	process.env['npm_config_fetch_retry_mintimeout'] = '0';
 }
 
+/** Rejects with an explicit message instead of letting vitest report a silent timeout. */
+function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+	let timer: NodeJS.Timeout;
+	const t = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms: ${what}`)), ms); });
+	return Promise.race([p, t]).finally(() => clearTimeout(timer));
+}
+
+let childPid: number | undefined;
+
+/**
+ * POSIX: the updater runs in its own process group, so SIGKILL of the group also reaches the npm
+ * it spawned (sh -> npm). Windows has no groups; the orphaned npm there dies when the registry stops.
+ */
+function killGroup(): void {
+	if (process.platform === 'win32' || childPid === undefined) return;
+	try { process.kill(-childPid, 'SIGKILL'); } catch { /* ESRCH: group already gone */ }
+}
+
 function waitFor(cond: () => boolean, what: string, ms = 40_000): Promise<void> {
 	return new Promise((resolve, reject) => {
 		const t0 = Date.now();
@@ -68,14 +86,16 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-	await registry.stop();
+	killGroup();
+	childPid = undefined;
+	await within(registry.stop(), 15_000, 'MockRegistry.stop()');
 	for (const k of ['npm_config_registry', 'npm_config_prefix', 'npm_config_cache', 'npm_config_fetch_retries', 'npm_config_fetch_retry_mintimeout']) delete process.env[k];
 	for (const d of [configDir, npmPrefix, scriptDir]) rmSync(d, { recursive: true, force: true });
 });
 
 
 describe('updater killed mid-install', () => {
-	it('is repaired by the next run: previous version reinstalled, state finalised, lock taken over', { timeout: 120_000 }, async () => {
+	it('is repaired by the next run: previous version reinstalled, state finalised, lock taken over', { timeout: 100_000 }, async () => {
 		// 1. Machine state: 1.0.0 installed globally in the temp prefix.
 		registry.setLatestVersion(PKG, '1.0.0', 'old');
 		registry.setLatestVersion(PKG, '2.0.0');
@@ -89,7 +109,10 @@ describe('updater killed mid-install', () => {
 import { runUpdater } from ${JSON.stringify(pathToFileURL(DIST_INDEX).href)};
 await runUpdater({ pkgName: ${JSON.stringify(PKG)}, configDir: ${JSON.stringify(configDir)}, currentVersion: '1.0.0', strategy: 'without-daemon' });
 `);
-		const child = spawn(process.execPath, [childScript], { stdio: 'ignore', env: process.env });
+		const child = spawn(process.execPath, [childScript], {
+			stdio: 'ignore', env: process.env, detached: process.platform !== 'win32',
+		});
+		childPid = child.pid;
 		const exited = new Promise<void>((r) => child.on('exit', () => r()));
 		await waitFor(() => applyingState() !== null, "the child to persist an 'applying' state");
 		const applying = applyingState()!;
@@ -97,10 +120,15 @@ await runUpdater({ pkgName: ${JSON.stringify(PKG)}, configDir: ${JSON.stringify(
 		// give npm time to open the stalled tarball request
 		await new Promise((r) => setTimeout(r, 3_000));
 
-		// 3. Hard kill (no handler can run). Stopping the registry also makes the orphaned npm fail.
+		// 3. Hard kill of the updater process only (no handler can run). On POSIX its sh/npm child
+		// survives as an orphan, exactly as in production, and keeps the stalled request open.
 		child.kill('SIGKILL');
-		await exited;
-		await registry.stop();
+		await within(exited, 10_000, 'the killed updater to exit');
+		// The registry must shut down even with that request still open, then the orphan is reaped
+		// (POSIX: whole group; Windows: it fails once the server is gone) so it cannot finish the
+		// install behind the repair's back.
+		await within(registry.stop(), 15_000, 'MockRegistry.stop() with a stalled request open');
+		killGroup();
 		await new Promise((r) => setTimeout(r, 2_000));
 
 		// 4. Simulate what npm had already done when it died: the old package removed.

@@ -25,6 +25,7 @@ Cause: an updater killed inside `npm install -g` left the old package removed, n
 
 ## Known limits
 
-- A timed-out or killed npm may leave its child processes running; repair could race an orphaned npm. Not verified on a real Windows kill with a real half-removed package.
+- Hard-killing the updater does not kill its npm child. Observed in CI (Linux): after the kill, `sh` and `npm install @te...` were still alive ("Terminate orphan process" in the post-job cleanup), because without `npm-cli.js` beside node, `execNpm` runs npm through `sh`. That orphan can finish or half-write the global dir while the next run repairs. Not handled in code: `execNpm` is synchronous and never learns the npm pid. Follow-up: spawn npm asynchronously, record its pid in the `applying` state, and have repair wait for or kill that pid first.
+- Not verified on a real Windows kill with a real half-removed package.
 - `with-daemon` strategy is unchanged (it never installs).
 - The legacy `update-log.txt` is not written by this package; all decisions go to `logs/<date>.ndjson`.

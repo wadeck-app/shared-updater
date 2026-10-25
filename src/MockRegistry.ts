@@ -135,7 +135,11 @@ export class MockRegistry {
 	stop(): Promise<void> {
 		return new Promise((resolve) => {
 			if (!this.serverProcess) return resolve();
-			this.serverProcess.on('exit', () => {
+			const proc = this.serverProcess;
+			// Bounded: a server that ignores SIGTERM must not hang the suite.
+			const force = setTimeout(() => proc.kill('SIGKILL'), 5_000);
+			proc.on('exit', () => {
+				clearTimeout(force);
 				try { rmSync(this.stateDir, { recursive: true, force: true }); } catch { /* ignore */ }
 				resolve();
 			});

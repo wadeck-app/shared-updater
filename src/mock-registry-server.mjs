@@ -192,6 +192,13 @@ server.listen(0, '127.0.0.1', () => {
 	process.stdout.write(JSON.stringify({ type: 'ready', port }) + '\n');
 });
 
-// Keep alive until killed
-process.on('SIGTERM', () => server.close());
-process.on('SIGINT', () => server.close());
+// Keep alive until killed. server.close() alone waits for in-flight requests: a stalled tarball
+// request held open by an orphaned npm would keep this process (and MockRegistry.stop()) alive
+// forever on POSIX, where SIGTERM is catchable (on Windows it is a hard kill).
+const shutdown = () => {
+	server.closeAllConnections();
+	server.close();
+	process.exit(0);
+};
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
