@@ -1,23 +1,121 @@
 import type { WithoutDaemonConfig } from '../types.js';
 import { appendLog } from './log.js';
-import { execNpm } from './npm.js';
+import { runNpmAsync } from './npm.js';
 import { findLeftoverTempDirs, verifyInstalled } from './installed.js';
 import { isPidAlive } from './lock.js';
-import { readState, writeState, stateFilePath } from './state.js';
+import { getProcessStartMs, isProcessRunning, killProcessTree } from './process.js';
+import { journalNpmChild, readState, writeState, stateFilePath } from './state.js';
 
 export const INSTALL_TIMEOUT_MS = 5 * 60_000;
 /** An 'applying' record older than this is dead whatever its pid says (pid reuse). */
 const APPLYING_STALE_MS = 15 * 60_000;
+export const DEFAULT_ORPHAN_NPM_WAIT_MS = 30_000;
+/** An npm is stopped after INSTALL_TIMEOUT_MS: a recorded npm pid older than this + margin is not our npm. */
+const ORPHAN_MAX_AGE_MS = INSTALL_TIMEOUT_MS + 60_000;
+/** Allowed gap between the journaled spawn time and the live process' start time (ps has 1 s resolution). */
+const START_TIME_TOLERANCE_MS = 15_000;
+const ORPHAN_STOP_GRACE_MS = 10_000;
 
 export function installFlags(cfg: WithoutDaemonConfig): string[] {
 	return cfg.npmInstallFlags ?? [];
 }
 
 /**
+ * `npm install -g <spec>` with its pid journaled in the 'applying' state as soon as it is
+ * spawned (and cleared when it ends), so that a hard-killed updater leaves a trail to the
+ * orphaned npm. Throws like execNpm did (message `Command failed: ...`, `code: 'ETIMEDOUT'`).
+ */
+export async function installGlobal(cfg: WithoutDaemonConfig, spec: string): Promise<void> {
+	const file = stateFilePath(cfg.configDir);
+	try {
+		await runNpmAsync(['install', '-g', spec, ...installFlags(cfg)], {
+			timeout: INSTALL_TIMEOUT_MS,
+			onSpawn: (pid) => journalNpmChild(file, { pid, startedAt: Date.now() }),
+		});
+	} finally {
+		try { journalNpmChild(file, null); } catch (err) {
+			appendLog(cfg.configDir, 'warn', `${cfg.pkgName} could not clear the npm pid from ${file}: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+}
+
+export interface OrphanDeps {
+	isRunning: (pid: number) => boolean;
+	stopTree: (pid: number) => void;
+	startMs: (pid: number) => number | null;
+	sleep: (ms: number) => Promise<void>;
+	now: () => number;
+}
+const realOrphanDeps: OrphanDeps = {
+	isRunning: isProcessRunning,
+	stopTree: killProcessTree,
+	startMs: (pid) => getProcessStartMs(pid),
+	sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+	now: () => Date.now(),
+};
+
+/**
+ * Before the global dir is touched: if the journal names an npm that is still running (orphaned
+ * by a hard-killed updater), give it `orphanNpmWaitMs` to finish, then stop its whole tree.
+ * Returns false only when the orphan could not be stopped (repair must not race it).
+ *
+ * Pid reuse: the pid is only trusted when the journaled spawn time is younger than any npm can
+ * be (INSTALL_TIMEOUT_MS) and, where the OS tells us (ps / PowerShell), the live process started
+ * within 15 s of it. When the start time cannot be read, only the age bound protects an unrelated
+ * process that recycled the pid within those ~6 minutes.
+ */
+export async function reapOrphanNpm(
+	cfg: WithoutDaemonConfig,
+	state: { npmPid?: number; npmStartedAt?: number },
+	overrides: Partial<OrphanDeps> = {},
+): Promise<boolean> {
+	const { pkgName, configDir } = cfg;
+	const pid = state.npmPid;
+	if (pid === undefined) return true;
+	const d = { ...realOrphanDeps, ...overrides };
+	if (!d.isRunning(pid)) {
+		appendLog(configDir, 'info', `${pkgName} the npm (pid ${pid}) recorded by the interrupted updater is no longer running`);
+		return true;
+	}
+	const startedAt = state.npmStartedAt;
+	if (startedAt === undefined || d.now() - startedAt > ORPHAN_MAX_AGE_MS) {
+		appendLog(configDir, 'warn', `${pkgName} pid ${pid} is alive but was recorded ${startedAt === undefined ? 'without a spawn time' : `${Math.round((d.now() - startedAt) / 1000)}s ago`}, longer than any npm install can run: assuming the pid was reused, NOT touching it`);
+		return true;
+	}
+	const actual = d.startMs(pid);
+	if (actual === null) {
+		appendLog(configDir, 'warn', `${pkgName} cannot read the start time of pid ${pid}: its identity is unverified, relying on the recorded spawn time only`);
+	} else if (Math.abs(actual - startedAt) > START_TIME_TOLERANCE_MS) {
+		appendLog(configDir, 'warn', `${pkgName} pid ${pid} started ${Math.round((actual - startedAt) / 1000)}s away from the recorded npm spawn: the pid was reused, NOT touching it`);
+		return true;
+	}
+
+	const waitMs = cfg.orphanNpmWaitMs ?? DEFAULT_ORPHAN_NPM_WAIT_MS;
+	appendLog(configDir, 'warn', `${pkgName} npm (pid ${pid}) orphaned by the interrupted updater is still running, waiting up to ${waitMs}ms for it to finish before repairing`);
+	const waitUntil = d.now() + waitMs;
+	while (d.isRunning(pid) && d.now() < waitUntil) await d.sleep(Math.min(250, Math.max(0, waitUntil - d.now())));
+	if (!d.isRunning(pid)) {
+		appendLog(configDir, 'info', `${pkgName} orphaned npm (pid ${pid}) finished on its own`);
+		return true;
+	}
+
+	appendLog(configDir, 'error', `${pkgName} orphaned npm (pid ${pid}) did not finish within ${waitMs}ms: STOPPING its process tree before repairing`);
+	d.stopTree(pid);
+	const stopUntil = d.now() + ORPHAN_STOP_GRACE_MS;
+	while (d.isRunning(pid) && d.now() < stopUntil) await d.sleep(100);
+	if (d.isRunning(pid)) {
+		appendLog(configDir, 'error', `${pkgName} orphaned npm (pid ${pid}) is STILL running after being stopped: not repairing (it would race the repair). Stop it manually (taskkill /PID ${pid} /T /F on Windows, kill -9 -${pid} elsewhere); the next run retries`);
+		return false;
+	}
+	appendLog(configDir, 'warn', `${pkgName} orphaned npm (pid ${pid}) stopped`);
+	return true;
+}
+
+/**
  * Makes `version` the installed one, trusting the filesystem rather than npm's exit code.
  * No-op when it is already there.
  */
-export function ensureVersion(cfg: WithoutDaemonConfig, version: string): { ok: boolean; error?: string } {
+export async function ensureVersion(cfg: WithoutDaemonConfig, version: string): Promise<{ ok: boolean; error?: string }> {
 	const { pkgName, configDir } = cfg;
 	const before = verifyInstalled(pkgName, version);
 	if (before.ok) {
@@ -26,7 +124,7 @@ export function ensureVersion(cfg: WithoutDaemonConfig, version: string): { ok: 
 	}
 	appendLog(configDir, 'warn', `${pkgName}@${version} not in place (${before.reason}), running npm install -g ${pkgName}@${version}`);
 	try {
-		execNpm(['install', '-g', `${pkgName}@${version}`, ...installFlags(cfg)], { timeout: INSTALL_TIMEOUT_MS });
+		await installGlobal(cfg, `${pkgName}@${version}`);
 	} catch (err) {
 		return { ok: false, error: `npm install -g ${pkgName}@${version} failed: ${describeNpmError(err)}` };
 	}
@@ -38,11 +136,11 @@ export function ensureVersion(cfg: WithoutDaemonConfig, version: string): { ok: 
 	return after.ok ? { ok: true } : { ok: false, error: `npm reported success but ${after.reason}` };
 }
 
-/** A timeout kills npm but may leave its children running and the package half-replaced. */
+/** A timeout stops npm's whole process tree but leaves the package possibly half-replaced. */
 export function describeNpmError(err: unknown): string {
 	const e = err as NodeJS.ErrnoException & { signal?: string };
 	if (e?.code === 'ETIMEDOUT') {
-		return `timed out after ${INSTALL_TIMEOUT_MS / 60_000} min (npm was killed; its child processes may still be running and the package may be half-replaced): ${e.message}`;
+		return `timed out after ${INSTALL_TIMEOUT_MS / 60_000} min (npm and its child processes were stopped; the package may be half-replaced): ${e.message}`;
 	}
 	return String(err);
 }
@@ -77,6 +175,9 @@ export async function repairInterruptedInstall(
 	const previous = state.previousVersion ?? state.currentVersion;
 	const target = state.targetVersion;
 	appendLog(configDir, 'error', `${pkgName} previous install ${previous} -> ${target} was interrupted (updater pid ${state.pid ?? '?'} is gone), verifying the installation`);
+
+	// An npm orphaned by the dead updater may still be writing the global dir: it goes first.
+	if (!(await reapOrphanNpm(cfg, state))) return true;
 	warnLeftoverTempDirs(cfg);
 
 	const done = (status: 'success' | 'rolled-back' | 'failed', error?: string): void => {
@@ -110,7 +211,7 @@ export async function repairInterruptedInstall(
 		done('failed', msg);
 		return true;
 	}
-	const res = ensureVersion(cfg, restoreTo);
+	const res = await ensureVersion(cfg, restoreTo);
 	if (res.ok) {
 		appendLog(configDir, 'warn', `${pkgName} repaired: ${restoreTo} is installed again after an interrupted update to ${target ?? '?'}`);
 		done('rolled-back', `interrupted install repaired: ${restoreTo} restored`);

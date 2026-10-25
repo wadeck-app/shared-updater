@@ -23,6 +23,10 @@ export interface UpdateState {
 	error?: string;
 	/** Set when status is 'applying': pid of the updater process performing the install. */
 	pid?: number;
+	/** While an npm install of this journal runs: its pid, so a later run can stop an orphan. */
+	npmPid?: number;
+	/** Epoch ms at which npmPid was spawned; detects pid reuse. */
+	npmStartedAt?: number;
 	timestamp: number;
 	/** Set when status is 'deferred': epoch ms at which the update should be retried. */
 	retryAt?: number;
@@ -91,6 +95,11 @@ export interface WithoutDaemonConfig extends UpdaterBaseConfig {
 	 * (e.g. whatsapp-web.js runs husky on install which fails in non-interactive env).
 	 */
 	npmInstallFlags?: string[];
+	/**
+	 * Repair of an interrupted install: how long to wait for a still-running npm orphaned by the
+	 * dead updater to finish on its own before its process tree is stopped. Default 30 000 ms.
+	 */
+	orphanNpmWaitMs?: number;
 }
 
 export type UpdaterConfig = WithoutDaemonConfig | WithDaemonConfig;

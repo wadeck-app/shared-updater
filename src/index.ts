@@ -1,7 +1,7 @@
 // violations-suppress: ts/no-barrel-index published package API
 export type { UpdaterConfig, WithDaemonConfig, WithoutDaemonConfig, UpdateConfig, UpdateState, UpdateCache, Strategy } from './types.js';
 export { semverLte } from './shared/semver.js';
-export { execNpm } from './shared/npm.js';
+export { execNpm, runNpmAsync } from './shared/npm.js';
 export { tryAcquireLock, releaseLock } from './shared/lock.js';
 export { readState, writeState, readCache, writeCache, stateFilePath, cacheFilePath, lockFilePath } from './shared/state.js';
 export { readUpdateConfig } from './shared/config.js';
@@ -20,5 +20,6 @@ export async function runUpdater(cfg: import('./types.js').UpdaterConfig): Promi
 }
 export { verifyInstalled, findLeftoverTempDirs } from './shared/installed.js';
 export type { InstalledCheck } from './shared/installed.js';
-export { repairInterruptedInstall, ensureVersion } from './shared/recovery.js';
+export { repairInterruptedInstall, ensureVersion, installGlobal, reapOrphanNpm } from './shared/recovery.js';
 export { isPidAlive } from './shared/lock.js';
+export { isProcessRunning, killProcessTree } from './shared/process.js';

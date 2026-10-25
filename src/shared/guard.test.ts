@@ -49,3 +49,33 @@ describe('installInterruptGuard', () => {
 		expect(process.listenerCount('SIGTERM')).toBe(before);
 	});
 });
+
+describe('installInterruptGuard stops the npm tree it owns', () => {
+	it('stops the children on a signal and names them in the log', () => {
+		expect(tryAcquireLock(lockFile)).toBe(true);
+		const stopChildren = vi.fn(() => [4242]);
+		const { fire, dispose } = ourListener('SIGTERM', () => installInterruptGuard({ configDir, pkgName: '@t/p', lockFile, exit: vi.fn(), stopChildren }));
+
+		fire();
+
+		expect(stopChildren).toHaveBeenCalledTimes(1);
+		const log = readFileSync(join(configDir, 'logs', `${new Date().toISOString().slice(0, 10)}.ndjson`), 'utf8');
+		expect(log).toContain('npm process tree(s) 4242 stopped');
+		expect(existsSync(lockFile)).toBe(false);
+		dispose();
+	});
+
+	it('still releases the lock and exits when stopping the children throws', () => {
+		expect(tryAcquireLock(lockFile)).toBe(true);
+		const exit = vi.fn();
+		const { fire, dispose } = ourListener('SIGINT', () => installInterruptGuard({
+			configDir, pkgName: '@t/p', lockFile, exit, stopChildren: () => { throw new Error('taskkill missing'); },
+		}));
+
+		fire();
+
+		expect(existsSync(lockFile)).toBe(false);
+		expect(exit).toHaveBeenCalledWith(130);
+		dispose();
+	});
+});

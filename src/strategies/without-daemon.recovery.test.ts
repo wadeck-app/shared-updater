@@ -1,21 +1,23 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 vi.mock('../shared/fetch.js', () => ({ fetchLatestVersion: vi.fn() }));
-vi.mock('../shared/npm.js', () => ({ execNpm: vi.fn(), USE_NPM_CLI: false }));
+vi.mock('../shared/npm.js', () => ({ execNpm: vi.fn(), runNpmAsync: vi.fn(), USE_NPM_CLI: false }));
 
 import { fetchLatestVersion } from '../shared/fetch.js';
-import { execNpm } from '../shared/npm.js';
+import { execNpm, runNpmAsync } from '../shared/npm.js';
 import { runWithoutDaemon } from './without-daemon.js';
 import { readState, writeState, stateFilePath, lockFilePath } from '../shared/state.js';
 import { verifyInstalled } from '../shared/installed.js';
 import { createFakeNpm } from './fakeNpm.testutil.js';
+import { isProcessRunning, killProcessTree } from '../shared/process.js';
 
 const mockFetch = vi.mocked(fetchLatestVersion);
 const mockExecNpm = vi.mocked(execNpm);
+const mockRunNpm = vi.mocked(runNpmAsync);
 const PKG = '@test/pkg';
 
 let configDir: string;
@@ -42,6 +44,7 @@ function setup(opts?: Parameters<typeof createFakeNpm>[0]) {
 	fake.seed(PKG, '1.0.0');
 	fakeRoot = fake.root;
 	mockExecNpm.mockImplementation((args) => fake.impl(args));
+	mockRunNpm.mockImplementation(async (args) => fake.impl(args));
 	return fake;
 }
 
@@ -52,6 +55,7 @@ beforeEach(() => {
 	configDir = mkdtempSync(join(tmpdir(), 'shared-updater-rec-'));
 	mockFetch.mockReset();
 	mockExecNpm.mockReset();
+	mockRunNpm.mockReset();
 	delete process.env['UPDATER_FORCE'];
 	delete process.env['UPDATER_SELF_CHECK_CMD'];
 });
@@ -314,5 +318,121 @@ describe('repair of an interrupted install (state stays applying)', () => {
 
 		expect(existsSync(leftover)).toBe(true);
 		expect(readLog()).toContain('leftover npm temp dir');
+	});
+});
+
+describe('npm child pid is journaled', () => {
+	it("records npmPid/npmStartedAt in the 'applying' state while npm runs, and clears them afterwards", async () => {
+		const fake = setup();
+		let during: ReturnType<typeof readState> = null;
+		mockRunNpm.mockImplementation(async (args, opts) => {
+			opts?.onSpawn?.(4242);
+			during = readState(stateFilePath(configDir));
+			return fake.impl(args);
+		});
+		mockFetch.mockReturnValue('1.0.1');
+
+		await runWithoutDaemon(cfg());
+
+		expect(during).toMatchObject({ status: 'applying', npmPid: 4242, pid: process.pid });
+		expect(during!.npmStartedAt).toBeGreaterThan(Date.now() - 60_000);
+		const after = readState(stateFilePath(configDir));
+		expect(after?.status).toBe('success');
+		expect(after?.npmPid).toBeUndefined();
+	});
+
+	it('clears the npm pid from the journal when npm fails, before the restore runs', async () => {
+		const fake = setup();
+		const seen: Array<number | undefined> = [];
+		mockRunNpm.mockImplementation(async (args, opts) => {
+			seen.push(readState(stateFilePath(configDir))?.npmPid);
+			opts?.onSpawn?.(4000 + seen.length);
+			if (args.includes('@test/pkg@1.0.1')) throw new Error('boom');
+			return fake.impl(args);
+		});
+		mockFetch.mockReturnValue('1.0.1');
+
+		await runWithoutDaemon(cfg());
+
+		// the restore step (2nd npm call, only if needed) never sees the failed npm's pid
+		expect(seen[0]).toBeUndefined();
+		expect(readState(stateFilePath(configDir))?.npmPid).toBeUndefined();
+	});
+});
+
+describe('repair stops an npm orphaned by the dead updater (real process)', () => {
+	const sleepers: number[] = [];
+	afterEach(() => { for (const pid of sleepers.splice(0)) killProcessTree(pid); });
+
+	function orphan(): number {
+		const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+			stdio: 'ignore', windowsHide: true, detached: process.platform !== 'win32',
+		});
+		c.unref();
+		sleepers.push(c.pid!);
+		return c.pid!;
+	}
+
+	async function gone(pid: number): Promise<void> {
+		const t0 = Date.now();
+		while (isProcessRunning(pid)) {
+			if (Date.now() - t0 > 10_000) throw new Error(`orphan pid ${pid} still running 10s after the repair`);
+			await new Promise((r) => setTimeout(r, 50));
+		}
+	}
+
+	it('stops it (after the bounded wait) BEFORE reinstalling the previous version', async () => {
+		const fake = setup();
+		removePackage(fake.root);
+		const pid = orphan();
+		let orphanRunningAtInstall: boolean | undefined;
+		mockRunNpm.mockImplementation(async (args) => {
+			orphanRunningAtInstall = isProcessRunning(pid);
+			return fake.impl(args);
+		});
+		writeState(stateFilePath(configDir), {
+			status: 'applying', currentVersion: '1.0.0', previousVersion: '1.0.0', targetVersion: '1.0.1',
+			pid: deadPid(), npmPid: pid, npmStartedAt: Date.now(), timestamp: Date.now() - 60_000,
+		});
+
+		await runWithoutDaemon({ ...cfg(), orphanNpmWaitMs: 300 });
+
+		await gone(pid);
+		expect(orphanRunningAtInstall).toBe(false);
+		expect(installed()).toBe('1.0.0');
+		expect(readState(stateFilePath(configDir))?.status).toBe('rolled-back');
+		expect(readLog()).toContain('STOPPING its process tree');
+	});
+
+	it('leaves the orphan, the state and the disk alone while the journaled updater pid is alive and recent', async () => {
+		const fake = setup();
+		removePackage(fake.root);
+		const pid = orphan();
+		writeState(stateFilePath(configDir), {
+			status: 'applying', currentVersion: '1.0.0', previousVersion: '1.0.0', targetVersion: '1.0.1',
+			pid: process.ppid, npmPid: pid, npmStartedAt: Date.now(), timestamp: Date.now() - 1000,
+		});
+
+		await runWithoutDaemon({ ...cfg(), orphanNpmWaitMs: 300 });
+
+		expect(isProcessRunning(pid)).toBe(true);
+		expect(fake.installs).toEqual([]);
+		expect(readState(stateFilePath(configDir))?.status).toBe('applying');
+	});
+
+	it('does not touch a live pid recorded as npm long ago (pid reuse) and still repairs', async () => {
+		const fake = setup();
+		removePackage(fake.root);
+		const pid = orphan();
+		writeState(stateFilePath(configDir), {
+			status: 'applying', currentVersion: '1.0.0', previousVersion: '1.0.0', targetVersion: '1.0.1',
+			pid: deadPid(), npmPid: pid, npmStartedAt: Date.now() - 30 * 60_000, timestamp: Date.now() - 60_000,
+		});
+
+		await runWithoutDaemon({ ...cfg(), orphanNpmWaitMs: 300 });
+
+		expect(isProcessRunning(pid)).toBe(true);
+		expect(installed()).toBe('1.0.0');
+		expect(readLog()).toContain('assuming the pid was reused');
 	});
 });

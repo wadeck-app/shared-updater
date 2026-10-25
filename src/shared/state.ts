@@ -23,6 +23,18 @@ export function writeState(stateFile: string, state: UpdateState): void {
 	}
 }
 
+/**
+ * Journals (or clears, with `npm: null`) the pid of the npm child in an 'applying' state. No-op
+ * when the state is not 'applying'. Throws when the write fails: an npm pid that cannot be
+ * journaled must not be left running unrecorded (runNpmAsync stops it).
+ */
+export function journalNpmChild(stateFile: string, npm: { pid: number; startedAt: number } | null): void {
+	const state = readState(stateFile);
+	if (!state || state.status !== 'applying') return;
+	const { npmPid: _p, npmStartedAt: _s, ...rest } = state;
+	writeState(stateFile, npm ? { ...rest, npmPid: npm.pid, npmStartedAt: npm.startedAt } : rest);
+}
+
 export function readCache(cacheFile: string): UpdateCache | null {
 	try {
 		return JSON.parse(readFileSync(cacheFile, 'utf8'));

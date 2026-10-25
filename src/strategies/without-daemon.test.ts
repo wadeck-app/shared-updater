@@ -12,10 +12,10 @@ function readLog(configDir: string): string {
 }
 
 vi.mock('../shared/fetch.js', () => ({ fetchLatestVersion: vi.fn() }));
-vi.mock('../shared/npm.js', () => ({ execNpm: vi.fn(), USE_NPM_CLI: false }));
+vi.mock('../shared/npm.js', () => ({ execNpm: vi.fn(), runNpmAsync: vi.fn(), USE_NPM_CLI: false }));
 
 import { fetchLatestVersion } from '../shared/fetch.js';
-import { execNpm } from '../shared/npm.js';
+import { execNpm, runNpmAsync } from '../shared/npm.js';
 import { runWithoutDaemon } from './without-daemon.js';
 import { readState, readCache, stateFilePath, cacheFilePath, lockFilePath } from '../shared/state.js';
 import { tryAcquireLock, releaseLock } from '../shared/lock.js';
@@ -23,6 +23,7 @@ import { createFakeNpm } from './fakeNpm.testutil.js';
 
 const mockFetch = vi.mocked(fetchLatestVersion);
 const mockExecNpm = vi.mocked(execNpm);
+const mockRunNpm = vi.mocked(runNpmAsync);
 
 let configDir: string;
 let fakeRoot: string | undefined;
@@ -34,6 +35,7 @@ function useFakeNpm(): ReturnType<typeof createFakeNpm> {
 	fake.seed('@test/pkg', '1.0.0');
 	fakeRoot = fake.root;
 	mockExecNpm.mockImplementation((args) => fake.impl(args));
+	mockRunNpm.mockImplementation(async (args) => fake.impl(args));
 	return fake;
 }
 
@@ -41,6 +43,7 @@ beforeEach(() => {
 	configDir = mkdtempSync(join(tmpdir(), 'shared-updater-wd-'));
 	mockFetch.mockReset();
 	mockExecNpm.mockReset();
+	mockRunNpm.mockReset();
 	delete process.env['UPDATER_FORCE'];
 	delete process.env['UPDATER_SELF_CHECK_CMD'];
 });
@@ -62,7 +65,7 @@ describe('without-daemon strategy', () => {
 
 		await runWithoutDaemon(cfg());
 
-		expect(mockExecNpm).toHaveBeenCalledWith(
+		expect(mockRunNpm).toHaveBeenCalledWith(
 			['install', '-g', '@test/pkg@1.0.1'],
 			expect.objectContaining({ timeout: expect.any(Number) }),
 		);
@@ -77,7 +80,7 @@ describe('without-daemon strategy', () => {
 
 		await runWithoutDaemon(cfg());
 
-		expect(mockExecNpm).not.toHaveBeenCalledWith(
+		expect(mockRunNpm).not.toHaveBeenCalledWith(
 			expect.arrayContaining(['install']),
 			expect.anything(),
 		);
@@ -118,10 +121,8 @@ describe('without-daemon strategy', () => {
 
 	it('writes failed state when npm install throws', async () => {
 		mockFetch.mockReturnValue('1.0.1');
-		mockExecNpm.mockImplementation((args) => {
-			if (args.includes('install')) throw new Error('npm install failed');
-			return '';
-		});
+		mockExecNpm.mockReturnValue('');
+		mockRunNpm.mockRejectedValue(new Error('npm install failed'));
 
 		await runWithoutDaemon(cfg());
 
@@ -139,7 +140,7 @@ describe('without-daemon strategy', () => {
 		await runWithoutDaemon(cfg());
 
 		// second execNpm call is the rollback to 1.0.0
-		const calls = mockExecNpm.mock.calls.filter((c) => c[0][0] === 'install');
+		const calls = mockRunNpm.mock.calls.filter((c) => c[0][0] === 'install');
 		expect(calls.length).toBeGreaterThanOrEqual(2);
 		expect(calls[1]![0]).toContain('@test/pkg@1.0.0');
 		expect(readState(stateFilePath(configDir))?.status).toBe('rolled-back');
@@ -199,7 +200,7 @@ describe('without-daemon strategy', () => {
 
 		await runWithoutDaemon(cfg());
 
-		expect(mockExecNpm).toHaveBeenCalledWith(
+		expect(mockRunNpm).toHaveBeenCalledWith(
 			['install', '-g', '@test/pkg@1.0.1'],
 			expect.objectContaining({ timeout: expect.any(Number) }),
 		);
@@ -228,7 +229,7 @@ describe('without-daemon strategy', () => {
 				onUpdateAvailable: async () => 'apply-now',
 			});
 
-			expect(mockExecNpm).toHaveBeenCalledWith(
+			expect(mockRunNpm).toHaveBeenCalledWith(
 				['install', '-g', '@test/pkg@1.0.1'],
 				expect.objectContaining({ timeout: expect.any(Number) }),
 			);
@@ -244,7 +245,7 @@ describe('without-daemon strategy', () => {
 				onUpdateAvailable: async () => ({ defer: true }),
 			});
 
-			expect(mockExecNpm).not.toHaveBeenCalled();
+			expect(mockRunNpm).not.toHaveBeenCalled();
 			const state = readState(stateFilePath(configDir));
 			expect(state?.status).toBe('deferred');
 			expect(state?.targetVersion).toBe('1.0.1');
@@ -261,7 +262,7 @@ describe('without-daemon strategy', () => {
 				onUpdateAvailable: async () => ({ defer: true, retryIn: 300_000 }),
 			});
 
-			expect(mockExecNpm).not.toHaveBeenCalled();
+			expect(mockRunNpm).not.toHaveBeenCalled();
 			const state = readState(stateFilePath(configDir));
 			expect(state?.status).toBe('deferred');
 			expect(state?.targetVersion).toBe('1.0.1');
@@ -295,7 +296,7 @@ describe('without-daemon strategy', () => {
 			// Should have re-checked and installed
 			expect(state?.status).toBe('success');
 			expect(mockFetch).toHaveBeenCalled();
-			expect(mockExecNpm).toHaveBeenCalledWith(
+			expect(mockRunNpm).toHaveBeenCalledWith(
 				expect.arrayContaining(['install']),
 				expect.anything(),
 			);

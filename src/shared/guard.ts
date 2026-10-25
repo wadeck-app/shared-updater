@@ -1,5 +1,6 @@
 import { appendLog } from './log.js';
 import { releaseLock } from './lock.js';
+import { stopTrackedChildren } from './process.js';
 
 const SIGNAL_EXIT_CODES: Record<string, number> = { SIGINT: 130, SIGTERM: 143, SIGBREAK: 149 };
 
@@ -9,25 +10,31 @@ export interface InterruptGuardOptions {
 	lockFile: string;
 	/** Injected by tests; defaults to process.exit. */
 	exit?: (code: number) => void;
+	/** Injected by tests; defaults to stopping every npm tree this process spawned. Returns the pids stopped. */
+	stopChildren?: () => number[];
 }
 
 /**
- * Releases the lock and logs when the updater is interrupted.
+ * Stops the npm process tree this updater owns, releases the lock and logs when the updater is
+ * interrupted (SIGINT / SIGTERM / SIGBREAK, or an 'exit' while npm is still running).
  *
- * Limits, by design:
- *  - Node only runs a signal handler when the event loop is free, and the npm install is a
- *    synchronous call: a signal that arrives during it is delivered once npm has returned.
- *    That is the safe direction (npm is never cut in half by a catchable signal).
- *  - SIGKILL, `taskkill /F`, `process.kill()` on Windows and a job-object kill run no handler at
- *    all. That case is covered by the persisted 'applying' state, repaired by the next run.
- * The 'applying' state is deliberately left untouched here so the next run still sees it.
+ * The npm install is asynchronous, so a catchable signal is handled immediately and cuts npm
+ * short; the half-done install is then repaired by the next run (the 'applying' state is
+ * deliberately left untouched here).
+ * SIGKILL, `taskkill /F`, `process.kill()` on Windows and a job-object kill run no handler at
+ * all: the npm child survives as an orphan. The 'applying' state records its pid, and the next
+ * run waits for / stops it before repairing (repairInterruptedInstall).
  */
 export function installInterruptGuard(opts: InterruptGuardOptions): () => void {
 	const exit = opts.exit ?? ((code: number) => process.exit(code));
 	const signals = ['SIGINT', 'SIGTERM', 'SIGBREAK'] as const;
 	const handlers = new Map<string, () => void>();
 
-	const onExit = (): void => releaseLock(opts.lockFile);
+	const stopChildren = opts.stopChildren ?? stopTrackedChildren;
+	const onExit = (): void => {
+		stopChildren();
+		releaseLock(opts.lockFile);
+	};
 	let disposed = false;
 	const dispose = (): void => {
 		if (disposed) return;
@@ -38,10 +45,12 @@ export function installInterruptGuard(opts: InterruptGuardOptions): () => void {
 
 	for (const sig of signals) {
 		const h = (): void => {
+			let stopped: number[] = [];
+			try { stopped = stopChildren(); } catch { /* must never block the release */ }
 			try {
 				appendLog(
 					opts.configDir, 'error',
-					`${opts.pkgName} updater interrupted by ${sig}: lock released; if an install was in progress the next run verifies the install and repairs it`,
+					`${opts.pkgName} updater interrupted by ${sig}: ${stopped.length > 0 ? `npm process tree(s) ${stopped.join(', ')} stopped, ` : ''}lock released; if an install was in progress the next run verifies the install and repairs it`,
 				);
 			} catch { /* logging must never block the release */ }
 			releaseLock(opts.lockFile);

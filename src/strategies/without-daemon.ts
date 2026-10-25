@@ -5,10 +5,9 @@ import { tryAcquireLock, releaseLock } from '../shared/lock.js';
 import { readCache, writeCache, writeState, stateFilePath, cacheFilePath, lockFilePath } from '../shared/state.js';
 import { readUpdateConfig } from '../shared/config.js';
 import { fetchLatestVersion } from '../shared/fetch.js';
-import { execNpm } from '../shared/npm.js';
 import { verifyInstalled } from '../shared/installed.js';
 import { installInterruptGuard } from '../shared/guard.js';
-import { INSTALL_TIMEOUT_MS, describeNpmError, ensureVersion, installFlags, repairInterruptedInstall } from '../shared/recovery.js';
+import { describeNpmError, ensureVersion, installGlobal, repairInterruptedInstall } from '../shared/recovery.js';
 import { appendLog } from '../shared/log.js';
 import { semverLte } from '../shared/semver.js';
 
@@ -113,9 +112,9 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 		appendLog(configDir, 'info', `${pkgName} installing ${latestVersion} (previous: ${currentVersion})`);
 
 		// Every failure below ends in a restore of the previous version + a state, never a bare return.
-		const failAndRestore = (status: 'failed' | 'rolled-back', why: string): void => {
+		const failAndRestore = async (status: 'failed' | 'rolled-back', why: string): Promise<void> => {
 			appendLog(configDir, 'error', `${pkgName} ${why}, restoring ${currentVersion}`);
-			const res = ensureVersion(cfg, currentVersion);
+			const res = await ensureVersion(cfg, currentVersion);
 			if (res.ok) {
 				appendLog(configDir, 'warn', `${pkgName} ${currentVersion} is installed again`);
 				writeState(installStateFile, { status, ...base, error: why, timestamp: Date.now() });
@@ -130,9 +129,9 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 		};
 
 		try {
-			execNpm(['install', '-g', `${pkgName}@${latestVersion}`, ...installFlags(cfg)], { timeout: INSTALL_TIMEOUT_MS });
+			await installGlobal(cfg, `${pkgName}@${latestVersion}`);
 		} catch (err) {
-			failAndRestore('failed', `install of ${latestVersion} failed: ${describeNpmError(err)}`);
+			await failAndRestore('failed', `install of ${latestVersion} failed: ${describeNpmError(err)}`);
 			return;
 		}
 
@@ -141,13 +140,13 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 		if (installed.unverifiable) {
 			appendLog(configDir, 'warn', `${pkgName} install of ${latestVersion} cannot be verified: ${installed.reason}`);
 		} else if (!installed.ok) {
-			failAndRestore('rolled-back', `npm install reported success but ${installed.reason}`);
+			await failAndRestore('rolled-back', `npm install reported success but ${installed.reason}`);
 			return;
 		}
 
 		const selfCheckPassed = await selfCheck();
 		if (!selfCheckPassed) {
-			failAndRestore('rolled-back', `self-check failed after update to ${latestVersion}`);
+			await failAndRestore('rolled-back', `self-check failed after update to ${latestVersion}`);
 			return;
 		}
 
