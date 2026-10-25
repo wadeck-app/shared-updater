@@ -10,11 +10,19 @@ export interface UpdateCache {
 }
 
 export interface UpdateState {
-	status: 'update-available' | 'success' | 'failed' | 'rolled-back' | 'deferred';
+	/**
+	 * 'applying': written BEFORE `npm install -g`, replaced by success / failed / rolled-back when
+	 * the install is finalised. Still present on a later run = the install was interrupted; that
+	 * run verifies the install and repairs it. Consumers (shared-cli UpdateManager) already treat
+	 * 'applying' as "updater still running" and do not clear it.
+	 */
+	status: 'update-available' | 'success' | 'failed' | 'rolled-back' | 'deferred' | 'applying';
 	currentVersion: string;
 	targetVersion?: string;
 	previousVersion?: string;
 	error?: string;
+	/** Set when status is 'applying': pid of the updater process performing the install. */
+	pid?: number;
 	timestamp: number;
 	/** Set when status is 'deferred': epoch ms at which the update should be retried. */
 	retryAt?: number;

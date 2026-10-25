@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { UpdateCache, UpdateState } from '../types.js';
 
@@ -10,7 +10,17 @@ export function readState(stateFile: string): UpdateState | null {
 
 export function writeState(stateFile: string, state: UpdateState): void {
 	mkdirSync(dirname(stateFile), { recursive: true });
-	writeFileSync(stateFile, JSON.stringify(state, null, 2));
+	const body = JSON.stringify(state, null, 2);
+	// Write-then-rename: a kill mid-write must not leave a truncated file, because the 'applying'
+	// record is what lets the next run detect an interrupted install.
+	const tmp = `${stateFile}.${process.pid}.tmp`;
+	try {
+		writeFileSync(tmp, body);
+		renameSync(tmp, stateFile);
+	} catch {
+		try { rmSync(tmp); } catch { /* ignore */ }
+		writeFileSync(stateFile, body);
+	}
 }
 
 export function readCache(cacheFile: string): UpdateCache | null {

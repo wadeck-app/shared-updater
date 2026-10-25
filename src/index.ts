@@ -18,3 +18,7 @@ export async function runUpdater(cfg: import('./types.js').UpdaterConfig): Promi
 	const { runWithDaemon: run } = await import('./strategies/with-daemon.js');
 	return run(cfg);
 }
+export { verifyInstalled, findLeftoverTempDirs } from './shared/installed.js';
+export type { InstalledCheck } from './shared/installed.js';
+export { repairInterruptedInstall, ensureVersion } from './shared/recovery.js';
+export { isPidAlive } from './shared/lock.js';

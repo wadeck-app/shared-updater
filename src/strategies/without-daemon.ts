@@ -6,6 +6,9 @@ import { readCache, writeCache, writeState, stateFilePath, cacheFilePath, lockFi
 import { readUpdateConfig } from '../shared/config.js';
 import { fetchLatestVersion } from '../shared/fetch.js';
 import { execNpm } from '../shared/npm.js';
+import { verifyInstalled } from '../shared/installed.js';
+import { installInterruptGuard } from '../shared/guard.js';
+import { INSTALL_TIMEOUT_MS, describeNpmError, ensureVersion, installFlags, repairInterruptedInstall } from '../shared/recovery.js';
 import { appendLog } from '../shared/log.js';
 import { semverLte } from '../shared/semver.js';
 
@@ -19,7 +22,12 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 		return;
 	}
 
+	const disposeGuard = installInterruptGuard({ configDir, pkgName, lockFile });
 	try {
+		// An 'applying' state left by a killed install is repaired first, regardless of
+		// autoUpdate / throttle: restoring a CLI that vanished is not "an update".
+		if (await repairInterruptedInstall(cfg, selfCheck)) return;
+
 		const updateCfg = readUpdateConfig(configDir);
 		// autoUpdate: false disables updating on our own initiative, not an update the user just
 		// asked for: UPDATER_FORCE=1 is only ever set by an explicit `<cli> cli update`. Either way
@@ -97,35 +105,49 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 			// decision === 'apply-now': fall through to install
 		}
 
+		const installStateFile = stateFilePath(configDir);
+		const base = { currentVersion, targetVersion: latestVersion, previousVersion: currentVersion };
+		// Persisted BEFORE npm runs: if this process is killed inside the install (npm removes the
+		// old package before the new one is in place), the next run finds 'applying' and repairs.
+		writeState(installStateFile, { status: 'applying', ...base, pid: process.pid, timestamp: Date.now() });
+		appendLog(configDir, 'info', `${pkgName} installing ${latestVersion} (previous: ${currentVersion})`);
+
+		// Every failure below ends in a restore of the previous version + a state, never a bare return.
+		const failAndRestore = (status: 'failed' | 'rolled-back', why: string): void => {
+			appendLog(configDir, 'error', `${pkgName} ${why}, restoring ${currentVersion}`);
+			const res = ensureVersion(cfg, currentVersion);
+			if (res.ok) {
+				appendLog(configDir, 'warn', `${pkgName} ${currentVersion} is installed again`);
+				writeState(installStateFile, { status, ...base, error: why, timestamp: Date.now() });
+			} else {
+				appendLog(configDir, 'error', `${pkgName} RESTORE FAILED, the CLI may be missing: ${res.error}. Fix manually: npm install -g ${pkgName}@${currentVersion}`);
+				writeState(installStateFile, {
+					status: 'failed', ...base,
+					error: `${why}; restore of ${currentVersion} failed: ${res.error}. Fix manually: npm install -g ${pkgName}@${currentVersion}`,
+					timestamp: Date.now(),
+				});
+			}
+		};
+
 		try {
-			execNpm(['install', '-g', `${pkgName}@${latestVersion}`, ...(cfg.npmInstallFlags ?? [])], { timeout: 5 * 60_000 });
+			execNpm(['install', '-g', `${pkgName}@${latestVersion}`, ...installFlags(cfg)], { timeout: INSTALL_TIMEOUT_MS });
 		} catch (err) {
-			appendLog(configDir, 'error', `${pkgName} install failed: ${err}`);
-			writeState(stateFilePath(configDir), {
-				status: 'failed',
-				currentVersion,
-				targetVersion: latestVersion,
-				error: String(err),
-				timestamp: Date.now(),
-			});
+			failAndRestore('failed', `install of ${latestVersion} failed: ${describeNpmError(err)}`);
+			return;
+		}
+
+		// npm's exit code is not proof: read the installed package.json.
+		const installed = verifyInstalled(pkgName, latestVersion);
+		if (installed.unverifiable) {
+			appendLog(configDir, 'warn', `${pkgName} install of ${latestVersion} cannot be verified: ${installed.reason}`);
+		} else if (!installed.ok) {
+			failAndRestore('rolled-back', `npm install reported success but ${installed.reason}`);
 			return;
 		}
 
 		const selfCheckPassed = await selfCheck();
 		if (!selfCheckPassed) {
-			appendLog(configDir, 'warn', `${pkgName} self-check failed after update, rolling back to ${currentVersion}`);
-			try {
-				execNpm(['install', '-g', `${pkgName}@${currentVersion}`, ...(cfg.npmInstallFlags ?? [])], { timeout: 5 * 60_000 });
-				writeState(stateFilePath(configDir), {
-					status: 'rolled-back',
-					currentVersion,
-					targetVersion: latestVersion,
-					previousVersion: currentVersion,
-					timestamp: Date.now(),
-				});
-			} catch (rollbackErr) {
-				appendLog(configDir, 'error', `${pkgName} rollback failed: ${rollbackErr}`);
-			}
+			failAndRestore('rolled-back', `self-check failed after update to ${latestVersion}`);
 			return;
 		}
 
@@ -142,6 +164,7 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 			await restartDaemon(cfg, latestVersion);
 		}
 	} finally {
+		disposeGuard();
 		releaseLock(lockFile);
 	}
 }

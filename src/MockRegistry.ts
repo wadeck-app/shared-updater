@@ -27,6 +27,8 @@ interface RegistryState {
 	[pkgName: string]: {
 		channels: Record<string, string>;
 		installError?: boolean;
+		/** Tarball requests for this version never get an answer (stalled download). */
+		hangTarball?: string;
 	};
 }
 
@@ -67,6 +69,16 @@ export class MockRegistry {
 	setInstallError(pkg: string, shouldFail: boolean): void {
 		if (!this.state[pkg]) this.state[pkg] = { channels: {} };
 		this.state[pkg]!.installError = shouldFail ? true : undefined;
+		this.writeState();
+	}
+
+	/**
+	 * Make the tarball request for `version` hang forever, so a test can kill the updater while
+	 * npm is mid-install. Pass undefined to clear. Writes state synchronously.
+	 */
+	setHangTarball(pkg: string, version: string | undefined): void {
+		if (!this.state[pkg]) this.state[pkg] = { channels: {} };
+		this.state[pkg]!.hangTarball = version;
 		this.writeState();
 	}
 

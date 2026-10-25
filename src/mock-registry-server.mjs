@@ -143,6 +143,9 @@ const server = createServer((req, res) => {
 		const version = versionMatch ? versionMatch[1] : null;
 		if (!version) { res.writeHead(404); res.end('Version not found'); return; }
 
+		// Stalled download: never answer, so a test can kill the updater while npm is in flight.
+		if (pkg.data.hangTarball === version) return;
+
 		const tarball = getTarball(name, version);
 		res.writeHead(200, {
 			'Content-Type': 'application/octet-stream',

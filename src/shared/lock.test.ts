@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { tryAcquireLock, releaseLock } from './lock.js';
+import { tryAcquireLock, releaseLock, isPidAlive } from './lock.js';
 
 let configDir: string;
 let lockFile: string;
@@ -59,5 +59,40 @@ describe('releaseLock', () => {
 
 	it('does not throw if file already absent', () => {
 		expect(() => releaseLock(lockFile)).not.toThrow();
+	});
+});
+
+describe('tryAcquireLock liveness edge cases', () => {
+	it('takes over immediately a lock whose pid is dead, even when it is only seconds old', () => {
+		const deadPid = spawnSync(process.execPath, ['-e', '0']).pid!;
+		writeFileSync(lockFile, JSON.stringify({ pid: deadPid, ts: Date.now() }));
+		expect(tryAcquireLock(lockFile)).toBe(true);
+		expect(JSON.parse(readFileSync(lockFile, 'utf8')).pid).toBe(process.pid);
+	});
+
+	it('respects a live foreign pid within the stale window (pid reuse is bounded by 10 min)', () => {
+		writeFileSync(lockFile, JSON.stringify({ pid: process.ppid, ts: Date.now() }));
+		expect(tryAcquireLock(lockFile)).toBe(false);
+	});
+
+	it('treats EPERM from process.kill as alive (process of another session), not dead', () => {
+		const spy = vi.spyOn(process, 'kill').mockImplementation(() => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); });
+		try {
+			expect(isPidAlive(4242)).toBe(true);
+		} finally { spy.mockRestore(); }
+	});
+
+	it('treats ESRCH and nonsense pids as dead', () => {
+		const spy = vi.spyOn(process, 'kill').mockImplementation(() => { throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' }); });
+		try {
+			expect(isPidAlive(4242)).toBe(false);
+		} finally { spy.mockRestore(); }
+		expect(isPidAlive(undefined)).toBe(false);
+		expect(isPidAlive(-1)).toBe(false);
+	});
+
+	it('takes over a lock without pid/ts (valid JSON, wrong shape)', () => {
+		writeFileSync(lockFile, '{}');
+		expect(tryAcquireLock(lockFile)).toBe(true);
 	});
 });

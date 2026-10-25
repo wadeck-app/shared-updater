@@ -19,11 +19,23 @@ import { execNpm } from '../shared/npm.js';
 import { runWithoutDaemon } from './without-daemon.js';
 import { readState, readCache, stateFilePath, cacheFilePath, lockFilePath } from '../shared/state.js';
 import { tryAcquireLock, releaseLock } from '../shared/lock.js';
+import { createFakeNpm } from './fakeNpm.testutil.js';
 
 const mockFetch = vi.mocked(fetchLatestVersion);
 const mockExecNpm = vi.mocked(execNpm);
 
 let configDir: string;
+let fakeRoot: string | undefined;
+
+// execNpm is mocked, but verifyInstalled() reads a real package.json: back the mock with a temp
+// "global root" where the current version (1.0.0) is installed, like on a real machine.
+function useFakeNpm(): ReturnType<typeof createFakeNpm> {
+	const fake = createFakeNpm();
+	fake.seed('@test/pkg', '1.0.0');
+	fakeRoot = fake.root;
+	mockExecNpm.mockImplementation((args) => fake.impl(args));
+	return fake;
+}
 
 beforeEach(() => {
 	configDir = mkdtempSync(join(tmpdir(), 'shared-updater-wd-'));
@@ -35,6 +47,8 @@ beforeEach(() => {
 
 afterEach(() => {
 	rmSync(configDir, { recursive: true, force: true });
+	if (fakeRoot) rmSync(fakeRoot, { recursive: true, force: true });
+	fakeRoot = undefined;
 	delete process.env['UPDATER_FORCE'];
 	delete process.env['UPDATER_SELF_CHECK_CMD'];
 });
@@ -44,7 +58,7 @@ const cfg = () => ({ pkgName: '@test/pkg', configDir, currentVersion: '1.0.0', s
 describe('without-daemon strategy', () => {
 	it('installs and writes success state when update available', async () => {
 		mockFetch.mockReturnValue('1.0.1');
-		mockExecNpm.mockReturnValue('');
+		useFakeNpm();
 
 		await runWithoutDaemon(cfg());
 
@@ -118,14 +132,14 @@ describe('without-daemon strategy', () => {
 
 	it('rolls back when self-check fails', async () => {
 		mockFetch.mockReturnValue('1.0.1');
-		mockExecNpm.mockReturnValue('');
+		useFakeNpm();
 		// self-check exits 1
 		process.env['UPDATER_SELF_CHECK_CMD'] = `"${process.execPath}" -e "process.exit(1)"`;
 
 		await runWithoutDaemon(cfg());
 
 		// second execNpm call is the rollback to 1.0.0
-		const calls = mockExecNpm.mock.calls;
+		const calls = mockExecNpm.mock.calls.filter((c) => c[0][0] === 'install');
 		expect(calls.length).toBeGreaterThanOrEqual(2);
 		expect(calls[1]![0]).toContain('@test/pkg@1.0.0');
 		expect(readState(stateFilePath(configDir))?.status).toBe('rolled-back');
@@ -133,7 +147,7 @@ describe('without-daemon strategy', () => {
 
 	it('second concurrent run is skipped (lock held)', async () => {
 		mockFetch.mockReturnValue('1.0.1');
-		mockExecNpm.mockReturnValue('');
+		useFakeNpm();
 
 		// Pre-acquire the lock as if another process holds it
 		tryAcquireLock(lockFilePath(configDir));
@@ -181,7 +195,7 @@ describe('without-daemon strategy', () => {
 		writeFileSync(`${configDir}/config.yml`, 'autoUpdate: false\n');
 		process.env['UPDATER_FORCE'] = '1';
 		mockFetch.mockReturnValue('1.0.1');
-		mockExecNpm.mockReturnValue('');
+		useFakeNpm();
 
 		await runWithoutDaemon(cfg());
 
@@ -195,7 +209,7 @@ describe('without-daemon strategy', () => {
 
 	it('succeeds without self-check when UPDATER_SELF_CHECK_CMD is not set', async () => {
 		mockFetch.mockReturnValue('1.0.1');
-		mockExecNpm.mockReturnValue('');
+		useFakeNpm();
 		delete process.env['UPDATER_SELF_CHECK_CMD'];
 
 		await runWithoutDaemon(cfg());
@@ -207,7 +221,7 @@ describe('without-daemon strategy', () => {
 	describe('onUpdateAvailable', () => {
 		it('proceeds with install when callback returns apply-now', async () => {
 			mockFetch.mockReturnValue('1.0.1');
-			mockExecNpm.mockReturnValue('');
+			useFakeNpm();
 
 			await runWithoutDaemon({
 				...cfg(),
@@ -260,7 +274,7 @@ describe('without-daemon strategy', () => {
 	describe('deferred retryAt', () => {
 		it('re-checks when deferred state retryAt has passed, even if cache is fresh', async () => {
 			mockFetch.mockReturnValue('1.0.1');
-			mockExecNpm.mockReturnValue('');
+			useFakeNpm();
 
 			// Set fresh cache (would normally prevent re-check)
 			writeFileSync(join(configDir, 'update-cache.json'), JSON.stringify({
@@ -321,7 +335,7 @@ describe('without-daemon strategy', () => {
 			vi.stubGlobal('fetch', mockFetchImpl);
 
 			mockFetch.mockReturnValue('1.0.1');
-			mockExecNpm.mockReturnValue('');
+			useFakeNpm();
 
 			await runWithoutDaemon({
 				...cfg(),
@@ -357,7 +371,7 @@ describe('without-daemon strategy', () => {
 			vi.stubGlobal('fetch', mockFetchImpl);
 
 			mockFetch.mockReturnValue('1.0.1');
-			mockExecNpm.mockReturnValue('');
+			useFakeNpm();
 
 			await runWithoutDaemon({
 				...cfg(),
