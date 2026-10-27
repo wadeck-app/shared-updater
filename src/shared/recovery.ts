@@ -145,10 +145,18 @@ export function describeNpmError(err: unknown): string {
 	return String(err);
 }
 
-export function warnLeftoverTempDirs(cfg: WithoutDaemonConfig): void {
+/**
+ * Leftover `.<name>-XXXX` dirs are never deleted. `restoring`: the previous version is about to be
+ * reinstalled, a dir may still hold a copy of it (warn). Otherwise the complete new install is kept,
+ * the dirs are not needed (info, no alarm, with the way to remove them).
+ */
+export function reportLeftoverTempDirs(cfg: WithoutDaemonConfig, restoring: boolean): void {
 	const leftovers = findLeftoverTempDirs(cfg.pkgName);
-	if (leftovers.length > 0) {
+	if (leftovers.length === 0) return;
+	if (restoring) {
 		appendLog(cfg.configDir, 'warn', `${cfg.pkgName} leftover npm temp dir(s) from an interrupted install, not deleted (may hold the previous version): ${leftovers.join(', ')}`);
+	} else {
+		appendLog(cfg.configDir, 'info', `${cfg.pkgName} leftover npm temp dir(s) from the interrupted install are not needed (the new version is complete); not deleted, remove them manually if wanted: ${leftovers.join(', ')}`);
 	}
 }
 
@@ -178,7 +186,6 @@ export async function repairInterruptedInstall(
 
 	// An npm orphaned by the dead updater may still be writing the global dir: it goes first.
 	if (!(await reapOrphanNpm(cfg, state))) return true;
-	warnLeftoverTempDirs(cfg);
 
 	const done = (status: 'success' | 'rolled-back' | 'failed', error?: string): void => {
 		writeState(file, {
@@ -197,6 +204,7 @@ export async function repairInterruptedInstall(
 		if (t.ok) {
 			if (await selfCheck()) {
 				appendLog(configDir, 'warn', `${pkgName}@${target} was fully installed and passes self-check, keeping it`);
+				reportLeftoverTempDirs(cfg, false);
 				done('success');
 				return true;
 			}
@@ -204,6 +212,7 @@ export async function repairInterruptedInstall(
 		}
 	}
 
+	reportLeftoverTempDirs(cfg, true);
 	const restoreTo = previous ?? target;
 	if (!restoreTo) {
 		const msg = 'interrupted install with no recorded version: cannot choose a version to restore, reinstall manually';

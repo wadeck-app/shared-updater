@@ -14,7 +14,7 @@ Cause: an updater killed inside `npm install -g` left the old package removed, n
 - Repair, before touching the global dir: if `npmPid` is still running, wait up to `orphanNpmWaitMs` (default 30 s), then stop its tree (logged at error level) and only then reinstall. If it cannot be stopped, the state stays `applying` (the next run retries) and nothing is reinstalled.
 - Lock: created atomically (`wx`); `EPERM` from `process.kill(pid, 0)` now means alive (was "dead").
 - `update-state.json` is written via temp file + rename.
-- Leftover npm temp dirs (`.<name>-XXXX` beside the package) are logged, never deleted.
+- Leftover npm temp dirs (`.<name>-XXXX` beside the package) are never deleted. Logged as `warn` (may hold the previous version) when the previous version is being restored, as `info` when the complete new version is kept.
 
 ## New exports
 
@@ -35,6 +35,7 @@ Cause: an updater killed inside `npm install -g` left the old package removed, n
   - Pid reuse: a live pid is stopped only if the journal is younger than 6 min and, when `ps` / PowerShell can report it, the process started within 15 s of the recorded spawn. Where the start time is unreadable (busybox `ps`, no PowerShell, access denied) only the 6 min bound protects an unrelated process that recycled the pid.
   - A descendant that left npm's process group (`setsid`), or on Windows whose parent already died, is not reached.
   - Linux zombies count as dead; elsewhere an unreaped zombie would make the repair report "STILL running".
+- Windows, observed with real npm (updater hard-killed without the tree option while npm ran a postinstall): npm and its `cmd /c` parent died but the postinstall `node.exe` grandchild survived with a dead parent, and the repair does not stop it. Not fixed on purpose: only `npmPid` is journaled, the grandchild's parent chain is dead (those pids can be reused) and its command line carries no marker tying it to the install. Stopping it would need name or guessed-path matching, which can end an unrelated process. If it holds the package dir, stop it manually (find it by its script path).
 - Windows: libuv puts non-detached children in a kill-on-close job object, so npm dies with a hard-killed updater (observed: a child of a terminated node was gone 1.5 s later). The orphan path is covered there only by unit tests with real processes; the real-npm integration test exercises it on POSIX only.
 - Not verified on Linux/macOS locally (CI only), nor on a real Windows kill with a real half-removed package.
 - `with-daemon` strategy is unchanged (it never installs).

@@ -319,6 +319,27 @@ describe('repair of an interrupted install (state stays applying)', () => {
 		expect(existsSync(leftover)).toBe(true);
 		expect(readLog()).toContain('leftover npm temp dir');
 	});
+
+	it('does not warn that a leftover temp dir may hold the previous version when the complete new version is kept', async () => {
+		const fake = setup();
+		fake.seed(PKG, '1.0.1');
+		const leftover = join(fake.root, '@test', '.pkg-AbCd1234');
+		mkdirSync(leftover, { recursive: true });
+		interruptedState();
+
+		await runWithoutDaemon(cfg());
+
+		expect(installed()).toBe('1.0.1');
+		expect(fake.installs).toEqual([]);
+		// never deleted: the dir is only provably retired by npm, not provably unneeded by us
+		expect(existsSync(leftover)).toBe(true);
+		const entries = readLog().trim().split('\n').map((l) => JSON.parse(l) as { level: string; msg: string });
+		const mentions = entries.filter((e) => e.msg.includes('leftover npm temp dir'));
+		expect(mentions.length).toBe(1);
+		expect(mentions[0]!.level).toBe('info');
+		expect(mentions[0]!.msg).not.toContain('may hold the previous version');
+		expect(mentions[0]!.msg).toContain(leftover);
+	});
 });
 
 describe('npm child pid is journaled', () => {
