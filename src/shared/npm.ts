@@ -6,20 +6,41 @@ import { killProcessTree, trackChild, untrackChild } from './process.js';
 const NPM_CLI_JS = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
 const USE_NPM_CLI = existsSync(NPM_CLI_JS);
 
+export interface NpmCommand {
+	/** The program, or the whole command line when `shell` is true. */
+	file: string;
+	args: string[];
+	shell: boolean;
+}
+
+/**
+ * One argument for cmd.exe (Windows `npm.cmd` must go through a shell). Quoted when it holds
+ * anything but plain path / spec characters, so a path with a space (a user folder named "John Doe") stays ONE
+ * argument. A character that cannot be quoted safely in cmd.exe is refused, never passed on.
+ */
+export function quoteCmdArg(arg: string): string {
+	if (/["%\r\n\0]/.test(arg)) {
+		throw new Error(`cannot pass ${JSON.stringify(arg)} to npm.cmd: a double quote, percent sign or line break in an argument cannot be quoted for cmd.exe`);
+	}
+	return /^[A-Za-z0-9_@/\\.:=+,-]+$/.test(arg) ? arg : `"${arg}"`;
+}
+
+/**
+ * How to run `npm <args>`: node + npm-cli.js beside it (argv, no shell), else `npm` from PATH:
+ * POSIX through an argv spawn (no shell), Windows (`npm.cmd`) through cmd.exe with every argument
+ * quoted. Never a bare `args.join(' ')`.
+ */
+export function buildNpmCommand(args: string[], opts: { useNpmCli?: boolean; platform?: NodeJS.Platform } = {}): NpmCommand {
+	if (opts.useNpmCli ?? USE_NPM_CLI) return { file: process.execPath, args: [NPM_CLI_JS, ...args], shell: false };
+	if ((opts.platform ?? process.platform) === 'win32') return { file: ['npm', ...args.map(quoteCmdArg)].join(' '), args: [], shell: true };
+	return { file: 'npm', args, shell: false };
+}
+
 /** Synchronous npm, for short read-only calls (`npm view`, `npm root -g`). Installs use runNpmAsync. */
 export function execNpm(args: string[], opts: { cwd?: string; timeout?: number } = {}): string {
-	if (USE_NPM_CLI) {
-		return execFileSync(process.execPath, [NPM_CLI_JS, ...args], {
-			encoding: 'utf8',
-			windowsHide: true,
-			...opts,
-		});
-	}
-	return execSync(['npm', ...args].join(' '), {
-		encoding: 'utf8',
-		windowsHide: true,
-		...opts,
-	});
+	const cmd = buildNpmCommand(args);
+	const common = { encoding: 'utf8' as const, windowsHide: true, ...opts };
+	return cmd.shell ? execSync(cmd.file, common) : execFileSync(cmd.file, cmd.args, common);
 }
 
 export interface RunNpmOptions {
@@ -30,6 +51,10 @@ export interface RunNpmOptions {
 	onSpawn?: (pid: number) => void;
 	/** Injected by tests. */
 	spawnFn?: typeof spawn;
+	/** Injected by tests: simulate a node install with / without npm-cli.js beside it. */
+	useNpmCli?: boolean;
+	/** Injected by tests. */
+	platform?: NodeJS.Platform;
 }
 
 /**
@@ -43,15 +68,15 @@ export function runNpmAsync(args: string[], opts: RunNpmOptions = {}): Promise<s
 	const spawnFn = opts.spawnFn ?? spawn;
 	const detached = process.platform !== 'win32';
 	const common = { cwd: opts.cwd, detached, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] as ['ignore', 'pipe', 'pipe'] };
-	const shellLine = ['npm', ...args].join(' ');
-	const label = USE_NPM_CLI ? `${process.execPath} ${NPM_CLI_JS} ${args.join(' ')}` : shellLine;
+	const cmd = buildNpmCommand(args, { useNpmCli: opts.useNpmCli, platform: opts.platform });
+	const label = cmd.shell ? cmd.file : `${cmd.file} ${cmd.args.join(' ')}`;
 
 	return new Promise<string>((resolve, reject) => {
 		let child: ChildProcess;
 		try {
-			child = USE_NPM_CLI
-				? spawnFn(process.execPath, [NPM_CLI_JS, ...args], common)
-				: spawnFn(shellLine, [], { ...common, shell: true });
+			child = cmd.shell
+				? spawnFn(cmd.file, [], { ...common, shell: true })
+				: spawnFn(cmd.file, cmd.args, common);
 		} catch (err) {
 			reject(err);
 			return;

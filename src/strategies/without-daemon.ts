@@ -10,10 +10,16 @@ import { installInterruptGuard } from '../shared/guard.js';
 import { describeNpmError, ensureVersion, installGlobal, repairInterruptedInstall } from '../shared/recovery.js';
 import { appendLog } from '../shared/log.js';
 import { semverLte } from '../shared/semver.js';
+import { stagedInstall, type SwapHandle } from '../shared/staged.js';
 
 export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> {
 	const force = process.env['UPDATER_FORCE'] === '1';
 	const { pkgName, configDir, currentVersion } = cfg;
+	// Set by the staged-install health test so the CLI under test cannot start an update itself.
+	if (process.env['UPDATER_DISABLE'] === '1') {
+		appendLog(configDir, 'info', `${pkgName} updater skipped: UPDATER_DISABLE=1`);
+		return;
+	}
 	const lockFile = lockFilePath(configDir);
 
 	if (!tryAcquireLock(lockFile)) {
@@ -128,11 +134,56 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 			}
 		};
 
-		try {
-			await installGlobal(cfg, `${pkgName}@${latestVersion}`);
-		} catch (err) {
-			await failAndRestore('failed', `install of ${latestVersion} failed: ${describeNpmError(err)}`);
-			return;
+		// Staged install: the previous version stays aside until the post-checks below pass.
+		let swap: SwapHandle | undefined;
+		// A post-check failed: with a staged swap the previous version is renamed back (no network, no
+		// npm); only when that fails, or after a direct install, npm reinstalls it.
+		const rejectNew = async (status: 'failed' | 'rolled-back', why: string): Promise<void> => {
+			if (swap) {
+				const handle = swap;
+				swap = undefined;
+				appendLog(configDir, 'error', `${pkgName} ${why}, putting ${currentVersion} back from the staged swap`);
+				const undone = await handle.rollback();
+				if (undone.ok) {
+					appendLog(configDir, 'warn', `${pkgName} ${currentVersion} is back in place (renamed, no download)`);
+					writeState(installStateFile, { status, ...base, error: why, timestamp: Date.now() });
+					return;
+				}
+				appendLog(configDir, 'error', `${pkgName} could not put ${currentVersion} back by rename: ${undone.error}; reinstalling it with npm`);
+			}
+			await failAndRestore(status, why);
+		};
+
+		let direct = cfg.stagedInstall === false;
+		if (!direct) {
+			const staged = await stagedInstall(cfg, latestVersion);
+			if (staged.kind === 'failed') {
+				// The global install was never touched: no restore, only a state. The next check retries.
+				appendLog(configDir, 'error', `${pkgName} update to ${latestVersion} abandoned: ${staged.why}`);
+				writeState(installStateFile, { status: 'failed', ...base, error: staged.why, timestamp: Date.now() });
+				return;
+			}
+			if (staged.kind === 'half-state') {
+				// Journal stays 'applying' (phase swapping): the next run's repair puts the previous version back.
+				appendLog(configDir, 'error', `${pkgName} update to ${latestVersion} left a broken install: ${staged.why}`);
+				return;
+			}
+			if (staged.kind === 'fallback') {
+				appendLog(configDir, 'warn', `${pkgName} staged install not used (${staged.reason}): falling back to a direct npm install -g, during which the CLI is missing until npm has downloaded and extracted it`);
+				// Drop the staged phase / paths from the journal; the direct install is journaled as before.
+				writeState(installStateFile, { status: 'applying', ...base, pid: process.pid, timestamp: Date.now() });
+				direct = true;
+			} else {
+				swap = staged.handle;
+			}
+		}
+		if (direct) {
+			try {
+				await installGlobal(cfg, `${pkgName}@${latestVersion}`);
+			} catch (err) {
+				await failAndRestore('failed', `install of ${latestVersion} failed: ${describeNpmError(err)}`);
+				return;
+			}
 		}
 
 		// npm's exit code is not proof: read the installed package.json.
@@ -140,16 +191,18 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 		if (installed.unverifiable) {
 			appendLog(configDir, 'warn', `${pkgName} install of ${latestVersion} cannot be verified: ${installed.reason}`);
 		} else if (!installed.ok) {
-			await failAndRestore('rolled-back', `npm install reported success but ${installed.reason}`);
+			await rejectNew('rolled-back', `${swap ? 'the swap' : 'npm install'} reported success but ${installed.reason}`);
 			return;
 		}
 
 		const selfCheckPassed = await selfCheck();
 		if (!selfCheckPassed) {
-			await failAndRestore('rolled-back', `self-check failed after update to ${latestVersion}`);
+			await rejectNew('rolled-back', `self-check failed after update to ${latestVersion}`);
 			return;
 		}
 
+		// The post-checks passed: only now is the previous version deleted.
+		swap?.commit();
 		writeState(stateFilePath(configDir), {
 			status: 'success',
 			currentVersion,

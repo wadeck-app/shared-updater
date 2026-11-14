@@ -29,6 +29,8 @@ interface RegistryState {
 		installError?: boolean;
 		/** Tarball requests for this version never get an answer (stalled download). */
 		hangTarball?: string;
+		/** Richer packages: extra package.json fields (bin, optionalDependencies...) and extra files. */
+		extra?: { manifest?: Record<string, unknown>; files?: Record<string, string> };
 	};
 }
 
@@ -79,6 +81,16 @@ export class MockRegistry {
 	setHangTarball(pkg: string, version: string | undefined): void {
 		if (!this.state[pkg]) this.state[pkg] = { channels: {} };
 		this.state[pkg]!.hangTarball = version;
+		this.writeState();
+	}
+
+	/**
+	 * Give every version of `pkg` extra package.json fields (e.g. `bin`, `optionalDependencies`)
+	 * and extra files (`{version}` in a file text is replaced by the version). Writes state synchronously.
+	 */
+	setPackageContent(pkg: string, extra: { manifest?: Record<string, unknown>; files?: Record<string, string> } | undefined): void {
+		if (!this.state[pkg]) this.state[pkg] = { channels: {} };
+		this.state[pkg]!.extra = extra;
 		this.writeState();
 	}
 

@@ -52,15 +52,28 @@ function buildTarHeader(filename, fileSize) {
 	return buf;
 }
 
-function createTarball(name, version) {
-	const pkgJson = JSON.stringify({ name, version, description: 'mock' });
-	const content = Buffer.from(pkgJson, 'utf8');
-	const header = buildTarHeader('package/package.json', content.length);
-	const paddedSize = Math.ceil(content.length / 512) * 512;
-	const contentPadded = Buffer.alloc(paddedSize);
-	content.copy(contentPadded);
-	const tar = Buffer.concat([header, contentPadded, Buffer.alloc(1024)]);
-	return gzipSync(tar);
+/**
+ * `extra` (optional, per package in the state file): { manifest: {...fields merged into package.json,
+ * e.g. bin, optionalDependencies}, files: { "bin/cli.js": "text, {version} is replaced" } }.
+ */
+function manifestOf(name, version, extra) {
+	return { name, version, description: 'mock', ...(extra?.manifest ?? {}) };
+}
+
+function createTarball(name, version, extra) {
+	const entries = [['package/package.json', JSON.stringify(manifestOf(name, version, extra))]];
+	for (const [path, text] of Object.entries(extra?.files ?? {})) {
+		entries.push(['package/' + path, text.split('{version}').join(version)]);
+	}
+	const parts = [];
+	for (const [path, text] of entries) {
+		const content = Buffer.from(text, 'utf8');
+		const paddedSize = Math.ceil(content.length / 512) * 512;
+		const contentPadded = Buffer.alloc(paddedSize);
+		content.copy(contentPadded);
+		parts.push(buildTarHeader(path, content.length), contentPadded);
+	}
+	return gzipSync(Buffer.concat([...parts, Buffer.alloc(1024)]));
 }
 
 function computeHashes(buf) {
@@ -72,9 +85,9 @@ function computeHashes(buf) {
 // In-memory tarball cache to avoid re-generating
 const tarballCache = new Map();
 
-function getTarball(name, version) {
-	const key = `${name}@${version}`;
-	if (!tarballCache.has(key)) tarballCache.set(key, createTarball(name, version));
+function getTarball(name, version, extra) {
+	const key = `${name}@${version}@${JSON.stringify(extra ?? null)}`;
+	if (!tarballCache.has(key)) tarballCache.set(key, createTarball(name, version, extra));
 	return tarballCache.get(key);
 }
 
@@ -146,7 +159,7 @@ const server = createServer((req, res) => {
 		// Stalled download: never answer, so a test can kill the updater while npm is in flight.
 		if (pkg.data.hangTarball === version) return;
 
-		const tarball = getTarball(name, version);
+		const tarball = getTarball(name, version, pkg.data.extra);
 		res.writeHead(200, {
 			'Content-Type': 'application/octet-stream',
 			'Content-Length': String(tarball.length),
@@ -172,13 +185,11 @@ const server = createServer((req, res) => {
 	const versions = {};
 
 	for (const version of new Set(Object.values(distTags))) {
-		const tarball = getTarball(name, version);
+		const tarball = getTarball(name, version, data.extra);
 		const { sha1, sha512b64 } = computeHashes(tarball);
 		const tarballUrl = `${baseUrl}/${encodedName}/-/${baseName}-${version}.tgz`;
 		versions[version] = {
-			name,
-			version,
-			description: 'mock',
+			...manifestOf(name, version, data.extra),
 			dist: { tarball: tarballUrl, shasum: sha1, integrity: `sha512-${sha512b64}` },
 		};
 	}

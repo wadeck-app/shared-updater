@@ -11,6 +11,11 @@ export async function runWithDaemon(cfg: WithDaemonConfig): Promise<void> {
 	// UPDATER_FORCE=1 → bypass cache interval + trigger immediate apply via POST /quit
 	const force = process.env['UPDATER_FORCE'] === '1';
 	const { pkgName, configDir, currentVersion } = cfg;
+	// Set by the staged-install health test so the CLI under test cannot start an update itself.
+	if (process.env['UPDATER_DISABLE'] === '1') {
+		appendLog(configDir, 'info', `${pkgName} updater skipped: UPDATER_DISABLE=1`);
+		return;
+	}
 	const lockFile = lockFilePath(configDir);
 
 	if (!tryAcquireLock(lockFile)) {

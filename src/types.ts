@@ -23,6 +23,20 @@ export interface UpdateState {
 	error?: string;
 	/** Set when status is 'applying': pid of the updater process performing the install. */
 	pid?: number;
+	/**
+	 * Staged install (without-daemon), only with status 'applying': the step the updater reached.
+	 * 'staging' (new version being installed into a private prefix) and 'staged' (installed, being
+	 * health-tested): the global install is untouched. 'swapping': the global package dir is being
+	 * renamed aside and the staged one renamed into place. 'swapped': new version in place, the old
+	 * dir and the stage are being deleted. A later run repairs each case (see recovery.ts).
+	 */
+	phase?: 'staging' | 'staged' | 'swapping' | 'swapped';
+	/** Staged install: the private prefix the new version is installed into. */
+	stagePath?: string;
+	/** Staged install: the global package directory (<npm root -g>/<pkg>). */
+	packageDirPath?: string;
+	/** Staged install: where the previous package dir is moved aside during the swap. */
+	oldDirPath?: string;
 	/** While an npm install of this journal runs: its pid, so a later run can stop an orphan. */
 	npmPid?: number;
 	/** Epoch ms at which npmPid was spawned; detects pid reuse. */
@@ -100,6 +114,48 @@ export interface WithoutDaemonConfig extends UpdaterBaseConfig {
 	 * dead updater to finish on its own before its process tree is stopped. Default 30 000 ms.
 	 */
 	orphanNpmWaitMs?: number;
+	/**
+	 * Install the new version into a private staging prefix, health-test it, then swap it in by
+	 * directory rename, so the global CLI is never missing during the download. Default true.
+	 * false = the old direct `npm install -g` (the CLI is missing for the duration of the download).
+	 * The staged path is also skipped, with a log line saying why, when it cannot apply (package not
+	 * installed globally, no `bin`, `bin` entries differ from the installed ones).
+	 */
+	stagedInstall?: boolean;
+	/**
+	 * Health test of the staged package, run before anything is switched. Default: run the staged
+	 * package's own bin entry with the node running the updater: `<bin> cli version`, isolated
+	 * environment (UPDATER_DISABLE=1, temp HOME / XDG_CONFIG_HOME / APPDATA), must exit 0 and print the
+	 * staged version. Return `{ ok: false, output }` (or throw) to abort the update: nothing is switched.
+	 */
+	healthCheck?: HealthCheck;
+	/** Time allowed to the default health check. Default 15 000 ms. */
+	healthCheckTimeoutMs?: number;
+	/**
+	 * Injection points of the staged install (file system, clock, sleep, volume check, a hook between
+	 * the two renames). For tests: leave unset.
+	 * @internal
+	 */
+	stagedDeps?: Partial<import('./shared/staged.js').StagedDeps>;
 }
+
+export interface HealthCheckInput {
+	pkgName: string;
+	/** The version the stage must report. */
+	version: string;
+	/** Directory of the staged package. */
+	packageDir: string;
+	/** Absolute path of the staged package's bin entry (the file to run with node). */
+	entry: string;
+	/** The CLI's config dir (the check must not write there). */
+	configDir: string;
+	timeoutMs: number;
+}
+export interface HealthCheckResult {
+	ok: boolean;
+	/** What to show the user when ok is false (the default check puts exit code + output here). */
+	output: string;
+}
+export type HealthCheck = (input: HealthCheckInput) => Promise<HealthCheckResult>;
 
 export type UpdaterConfig = WithoutDaemonConfig | WithDaemonConfig;

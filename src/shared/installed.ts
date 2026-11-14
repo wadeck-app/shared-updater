@@ -16,9 +16,9 @@ export interface InstalledCheck {
 	reason?: string;
 }
 
-/** Resolves `npm root -g` (honours NPM_CONFIG_PREFIX). Throws when npm cannot answer. */
-export function globalRoot(): string {
-	const root = String(execNpm(['root', '-g'], { timeout: 30_000 })).trim();
+/** Resolves `npm root -g` (honours NPM_CONFIG_PREFIX; `--prefix <prefix>` when given). Throws when npm cannot answer. */
+export function globalRoot(prefix?: string): string {
+	const root = String(execNpm(['root', '-g', ...(prefix === undefined ? [] : ['--prefix', prefix])], { timeout: 30_000 })).trim();
 	if (!root) throw new Error('`npm root -g` returned an empty path');
 	return root;
 }

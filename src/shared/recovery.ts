@@ -1,12 +1,15 @@
 import type { WithoutDaemonConfig } from '../types.js';
 import { appendLog } from './log.js';
-import { runNpmAsync } from './npm.js';
+import { INSTALL_TIMEOUT_MS } from './constants.js';
 import { findLeftoverTempDirs, verifyInstalled } from './installed.js';
 import { isPidAlive } from './lock.js';
 import { getProcessStartMs, isProcessRunning, killProcessTree } from './process.js';
-import { journalNpmChild, readState, writeState, stateFilePath } from './state.js';
+import { repairStagedPhase } from './staged.js';
+import { readState, writeState, stateFilePath } from './state.js';
+import { installGlobal, installFlags } from './installGlobal.js';
+import { sleep } from './util.js';
 
-export const INSTALL_TIMEOUT_MS = 5 * 60_000;
+export { INSTALL_TIMEOUT_MS };
 /** An 'applying' record older than this is dead whatever its pid says (pid reuse). */
 const APPLYING_STALE_MS = 15 * 60_000;
 export const DEFAULT_ORPHAN_NPM_WAIT_MS = 30_000;
@@ -16,28 +19,7 @@ const ORPHAN_MAX_AGE_MS = INSTALL_TIMEOUT_MS + 60_000;
 const START_TIME_TOLERANCE_MS = 15_000;
 const ORPHAN_STOP_GRACE_MS = 10_000;
 
-export function installFlags(cfg: WithoutDaemonConfig): string[] {
-	return cfg.npmInstallFlags ?? [];
-}
-
-/**
- * `npm install -g <spec>` with its pid journaled in the 'applying' state as soon as it is
- * spawned (and cleared when it ends), so that a hard-killed updater leaves a trail to the
- * orphaned npm. Throws like execNpm did (message `Command failed: ...`, `code: 'ETIMEDOUT'`).
- */
-export async function installGlobal(cfg: WithoutDaemonConfig, spec: string): Promise<void> {
-	const file = stateFilePath(cfg.configDir);
-	try {
-		await runNpmAsync(['install', '-g', spec, ...installFlags(cfg)], {
-			timeout: INSTALL_TIMEOUT_MS,
-			onSpawn: (pid) => journalNpmChild(file, { pid, startedAt: Date.now() }),
-		});
-	} finally {
-		try { journalNpmChild(file, null); } catch (err) {
-			appendLog(cfg.configDir, 'warn', `${cfg.pkgName} could not clear the npm pid from ${file}: ${err instanceof Error ? err.message : String(err)}`);
-		}
-	}
-}
+export { installGlobal, installFlags };
 
 export interface OrphanDeps {
 	isRunning: (pid: number) => boolean;
@@ -50,7 +32,7 @@ const realOrphanDeps: OrphanDeps = {
 	isRunning: isProcessRunning,
 	stopTree: killProcessTree,
 	startMs: (pid) => getProcessStartMs(pid),
-	sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+	sleep,
 	now: () => Date.now(),
 };
 
@@ -186,6 +168,10 @@ export async function repairInterruptedInstall(
 
 	// An npm orphaned by the dead updater may still be writing the global dir: it goes first.
 	if (!(await reapOrphanNpm(cfg, state))) return true;
+
+	// A staged install journals where it was: put the global package dir and the stage in order
+	// first; the generic verification below then decides what is installed and what to restore.
+	if (state.phase !== undefined) await repairStagedPhase(cfg, state, selfCheck);
 
 	const done = (status: 'success' | 'rolled-back' | 'failed', error?: string): void => {
 		writeState(file, {
