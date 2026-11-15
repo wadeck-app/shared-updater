@@ -81,6 +81,8 @@ export async function runWithoutDaemon(cfg: WithoutDaemonConfig): Promise<void> 
 			latestVersion = fetchLatestVersion(pkgName, updateCfg.channel);
 		} catch (err) {
 			appendLog(configDir, 'warn', `${pkgName} version fetch failed: ${err}`);
+			// A background check that cannot reach the registry tries again later; an update the user asked for did not happen.
+			if (force) process.exitCode = 1;
 			return;
 		}
 

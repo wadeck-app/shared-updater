@@ -396,3 +396,95 @@ describe('without-daemon strategy', () => {
 		});
 	});
 });
+
+// `<cli> cli update` runs the updater in front of the user (UPDATER_FORCE=1): the steps, the versions and the reason of a failure must be on
+// the screen and in the exit code. They used to be in the log file only: "Running updater..." was all the user saw, and an abandoned update
+// exited 0.
+describe('without-daemon strategy: an explicit update talks to the user', () => {
+	let out: string[];
+	let err: string[];
+	let previousExitCode: typeof process.exitCode;
+
+	beforeEach(() => {
+		out = [];
+		err = [];
+		previousExitCode = process.exitCode;
+		process.exitCode = undefined;
+		vi.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+			out.push(String(chunk));
+			return true;
+		});
+		vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+			err.push(String(chunk));
+			return true;
+		});
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		process.exitCode = previousExitCode;
+	});
+
+	it('says the installed version and that it is up to date', async () => {
+		process.env['UPDATER_FORCE'] = '1';
+		mockFetch.mockReturnValue('1.0.0');
+
+		await runWithoutDaemon(cfg());
+
+		expect(out.join('')).toContain('@test/pkg checking for updates (current: 1.0.0)');
+		expect(out.join('')).toContain('@test/pkg is up to date (1.0.0)');
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it('says from which version to which one it updates, and that it is done', async () => {
+		process.env['UPDATER_FORCE'] = '1';
+		mockFetch.mockReturnValue('1.0.1');
+		useFakeNpm();
+
+		await runWithoutDaemon(cfg());
+
+		expect(out.join('')).toContain('@test/pkg update available: 1.0.0 → 1.0.1');
+		expect(out.join('')).toContain('@test/pkg updated to 1.0.1');
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it('says why the registry could not be asked, and exits 1', async () => {
+		process.env['UPDATER_FORCE'] = '1';
+		mockFetch.mockImplementation(() => {
+			throw new Error('registry did not answer');
+		});
+
+		await runWithoutDaemon(cfg());
+
+		expect(err.join('')).toContain('[warning] @test/pkg version fetch failed: Error: registry did not answer');
+		expect(process.exitCode).toBe(1);
+	});
+
+	it('exits 1 and says why when the install fails', async () => {
+		process.env['UPDATER_FORCE'] = '1';
+		mockFetch.mockReturnValue('1.0.1');
+		const fake = useFakeNpm();
+		mockRunNpm.mockImplementation(async (args) => {
+			if (args[0] === 'install' && args.includes('@test/pkg@1.0.1')) {
+				throw new Error('npm install exploded');
+			}
+			return fake.impl(args);
+		});
+
+		await runWithoutDaemon(cfg());
+
+		expect(err.join('')).toMatch(/\[error\] @test\/pkg .*1\.0\.1 failed/);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it('prints nothing without an explicit request (the background check stays silent)', async () => {
+		mockFetch.mockReturnValue('1.0.1');
+		useFakeNpm();
+
+		await runWithoutDaemon(cfg());
+
+		expect(out).toEqual([]);
+		expect(err).toEqual([]);
+		expect(process.exitCode).toBeUndefined();
+	});
+});
